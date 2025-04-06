@@ -253,15 +253,35 @@ def setup_llama_cpp_path(llama_cpp_dir=None):
                     logger = logging.getLogger("safetensors-to-gguf")
                     logger.debug(f"Attempting to map Llama-4 tensor: {name}")
                     
+                    # Skip multimodal tensors
+                    if "vision_model" in name or "vision_tower" in name or "multi_modal" in name:
+                        logger.debug(f"Skipping multimodal tensor: {name}")
+                        return None
+                    
+                    # Skip MoE tensors
+                    if "experts" in name or "router" in name:
+                        logger.debug(f"Skipping MoE tensor: {name}")
+                        return None
+                    
                     # Handle shared expert tensors
                     if "feed_forward.shared_expert" in name:
-                        # Map feed-forward layers
-                        if "gate_proj" in name:
-                            return "feed_forward.gate_proj"
-                        elif "up_proj" in name:
-                            return "feed_forward.up_proj"
-                        elif "down_proj" in name:
-                            return "feed_forward.down_proj"
+                        # Extract layer number using regex
+                        import re
+                        # Try Llama-4 Scout specific pattern first
+                        layer_match = re.search(r"language_model\.model\.layers\.([0-9]+)\.feed_forward", name)
+                        if not layer_match:
+                            # Try original Llama-4 pattern
+                            layer_match = re.search(r"layers\.([0-9]+)\.feed_forward", name)
+                        
+                        if layer_match:
+                            layer_num = int(layer_match.group(1))
+                            # Map feed-forward layers with layer number
+                            if "gate_proj" in name:
+                                return f"blk.{layer_num}.ffn_gate"
+                            elif "up_proj" in name:
+                                return f"blk.{layer_num}.ffn_up"
+                            elif "down_proj" in name:
+                                return f"blk.{layer_num}.ffn_down"
                     
                     # Handle other Llama-4 specific tensor names
                     if "language_model.model.embed_tokens" in name:
@@ -271,7 +291,37 @@ def setup_llama_cpp_path(llama_cpp_dir=None):
                     elif "language_model.lm_head" in name:
                         return "output"
                     
-                    # Handle attention layers
+                    # Handle Llama-4 Scout specific tensor naming pattern
+                    import re
+                    if "language_model.model.layers" in name:
+                        # Extract layer number using regex
+                        layer_match = re.search(r"language_model\.model\.layers\.([0-9]+)", name)
+                        if layer_match:
+                            layer_num = int(layer_match.group(1))
+                            
+                            # Map attention and norm layers
+                            if "self_attn.q_proj.weight" in name:
+                                return f"blk.{layer_num}.attn_q"
+                            elif "self_attn.k_proj.weight" in name:
+                                return f"blk.{layer_num}.attn_k"
+                            elif "self_attn.v_proj.weight" in name:
+                                return f"blk.{layer_num}.attn_v"
+                            elif "self_attn.o_proj.weight" in name:
+                                return f"blk.{layer_num}.attn_output"
+                            elif "input_layernorm.weight" in name:
+                                return f"blk.{layer_num}.attn_norm"
+                            elif "post_attention_layernorm.weight" in name:
+                                return f"blk.{layer_num}.ffn_norm"
+                            
+                            # Map MLP layers
+                            elif "mlp.gate_proj.weight" in name:
+                                return f"blk.{layer_num}.ffn_gate"
+                            elif "mlp.up_proj.weight" in name:
+                                return f"blk.{layer_num}.ffn_up"
+                            elif "mlp.down_proj.weight" in name:
+                                return f"blk.{layer_num}.ffn_down"
+                    
+                    # Handle original Llama-4 tensor naming pattern
                     for layer_type in ["input_layernorm", "post_attention_layernorm", "self_attn.q_proj", 
                                     "self_attn.k_proj", "self_attn.v_proj", "self_attn.o_proj"]:
                         if layer_type in name:
