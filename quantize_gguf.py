@@ -106,9 +106,20 @@ def parse_args():
     
     parser.add_argument(
         "--type", type=str, choices=[
-            "q4_0", "q4_1", "q5_0", "q5_1", "q8_0", "q8_1", 
-            "q2_k", "q3_k", "q4_k", "q5_k", "q6_k", "q8_k",
-            "f16", "f32"
+            # Standard quantization types
+            "q4_0", "q4_1", "q5_0", "q5_1", "q8_0", 
+            # K-quant types (better quality)
+            "q2_k", "q2_k_s", "q3_k", "q3_k_s", "q3_k_m", "q3_k_l", 
+            "q4_k", "q4_k_s", "q4_k_m", "q5_k", "q5_k_s", "q5_k_m", "q6_k",
+            # IQ types (best compression)
+            "iq2_xxs", "iq2_xs", "iq2_s", "iq2_m",
+            "iq3_xxs", "iq3_xs", "iq3_s", "iq3_m",
+            "iq4_nl", "iq4_xs",
+            "iq1_s", "iq1_m",
+            # Ternary quantization
+            "tq1_0", "tq2_0",
+            # Full precision
+            "f16", "bf16", "f32"
         ], default="q4_k",
         help="Quantization type (default: q4_k)"
     )
@@ -116,6 +127,33 @@ def parse_args():
     parser.add_argument(
         "--threads", type=int, default=None,
         help="Number of threads to use for quantization (default: number of CPU cores)"
+    )
+    
+    parser.add_argument(
+        "--allow-requantize", action="store_true",
+        help="Allow requantizing tensors that have already been quantized (may reduce quality)"
+    )
+    
+    parser.add_argument(
+        "--leave-output-tensor", action="store_true",
+        help="Leave output.weight unquantized. Increases model size but may improve quality"
+    )
+    
+    parser.add_argument(
+        "--pure", action="store_true",
+        help="Disable k-quant mixtures and quantize all tensors to the same type"
+    )
+    
+    parser.add_argument(
+        "--output-tensor-type", type=str,
+        choices=["f32", "f16", "q8_0", "q4_0", "q4_1"],
+        help="Use this type for the output.weight tensor"
+    )
+    
+    parser.add_argument(
+        "--token-embedding-type", type=str,
+        choices=["f32", "f16", "q8_0", "q4_0", "q4_1"],
+        help="Use this type for the token embeddings tensor"
     )
     
     parser.add_argument(
@@ -200,7 +238,23 @@ def quantize_gguf_model(args):
     
     # Add threads if specified
     if args.threads:
-        cmd.extend(["-t", str(args.threads)])
+        cmd.extend([str(args.threads)])
+        
+    # Add optional flags
+    if args.allow_requantize:
+        cmd.append("--allow-requantize")
+        
+    if args.leave_output_tensor:
+        cmd.append("--leave-output-tensor")
+        
+    if args.pure:
+        cmd.append("--pure")
+        
+    if args.output_tensor_type:
+        cmd.extend(["--output-tensor-type", args.output_tensor_type])
+        
+    if args.token_embedding_type:
+        cmd.extend(["--token-embedding-type", args.token_embedding_type])
     
     # Execute the command
     logger.info(f"Running quantization command: {' '.join(cmd)}")

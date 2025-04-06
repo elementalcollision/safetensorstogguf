@@ -392,13 +392,49 @@ def parse_args():
     )
     
     parser.add_argument(
-        "--outtype", type=str, choices=["f32", "f16", "bf16", "q8_0", "tq1_0", "tq2_0", "auto"], default="auto",
+        "--outtype", type=str, choices=[
+            # Full precision
+            "f32", "f16", "bf16", 
+            # Standard quantization
+            "q8_0", "q5_0", "q5_1", "q4_0", "q4_1", 
+            # K-quant types
+            "q2_k", "q3_k", "q4_k", "q5_k", "q6_k",
+            # Ternary quantization
+            "tq1_0", "tq2_0", 
+            # Auto detection
+            "auto"
+        ], default="auto",
         help="Output data type (default: auto, which tries to detect from the model)"
     )
     
     parser.add_argument(
         "--bigendian", action="store_true",
         help="Use big endian format for output file (default: little endian / x86)"
+    )
+    
+    parser.add_argument(
+        "--optimize-for-size", action="store_true",
+        help="Optimize the conversion for smaller file size (may reduce precision)"
+    )
+    
+    parser.add_argument(
+        "--optimize-output-tensor", action="store_true",
+        help="Apply special optimization to the output tensor (may reduce size)"
+    )
+    
+    parser.add_argument(
+        "--optimize-for-size", action="store_true",
+        help="Optimize the conversion for smaller file size (may reduce precision)"
+    )
+    
+    parser.add_argument(
+        "--optimize-output-tensor", action="store_true",
+        help="Apply special optimization to the output tensor (may reduce size)"
+    )
+    
+    parser.add_argument(
+        "--optimize-token-embeddings", action="store_true",
+        help="Apply special optimization to the token embeddings (may reduce size)"
     )
     
     parser.add_argument(
@@ -463,6 +499,16 @@ def convert_safetensors_to_gguf(args):
     Args:
         args: Command line arguments
     """
+    logger = logging.getLogger("safetensors-to-gguf")
+    
+    # Log optimization settings if enabled
+    if args.optimize_for_size:
+        logger.info("Optimizing for size: enabled")
+    if args.optimize_output_tensor:
+        logger.info("Output tensor optimization: enabled")
+    if args.optimize_token_embeddings:
+        logger.info("Token embeddings optimization: enabled")
+    
     # Verify that the model directory contains safetensors files
     if not verify_safetensors_model(args.model):
         sys.exit(1)
@@ -541,6 +587,12 @@ def convert_safetensors_to_gguf(args):
                 # Use the model directory as the output directory
                 outfile = args.model / f"{model_name}.gguf"
                 logger.info(f"No output file specified, writing to model directory: {outfile}")
+            
+            # Set optimization flags in hparams for the model to use
+            if args.optimize_for_size or args.optimize_output_tensor or args.optimize_token_embeddings:
+                hparams["optimize_for_size"] = args.optimize_for_size
+                hparams["optimize_output_tensor"] = args.optimize_output_tensor
+                hparams["optimize_token_embeddings"] = args.optimize_token_embeddings
             
             model_instance = model_class(
                 args.model, 
