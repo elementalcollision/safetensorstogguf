@@ -12,8 +12,10 @@ import logging
 import os
 import sys
 import subprocess
+import tempfile
+import shutil
 from pathlib import Path
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 
 # Configure logging
 logger = logging.getLogger("quantize-gguf")
@@ -31,26 +33,60 @@ def setup_llama_cpp_path(llama_cpp_dir=None):
         possible_paths = [
             script_dir.parent.parent,  # If script is in llama.cpp/some_dir/safetensors-to-gguf
             script_dir.parent,         # If script is in llama.cpp/safetensors-to-gguf
-            script_dir                 # If script is directly in llama.cpp
+            script_dir,                # If script is directly in llama.cpp
+            Path("/Users/dave/llama.cpp")  # Direct path to llama.cpp
         ]
         
         for path in possible_paths:
-            quantize_binary = path / "quantize"
+            # Check for the binary in the main directory
+            quantize_binary = path / "llama-quantize"
             if os.name == 'nt':  # Windows
-                quantize_binary = path / "quantize.exe"
+                quantize_binary = path / "llama-quantize.exe"
                 
             if quantize_binary.exists():
                 llama_cpp_dir = path
+                logger.info(f"Found llama.cpp directory at: {llama_cpp_dir}")
+                break
+                
+            # Also check in the build/bin directory
+            build_bin_quantize_binary = path / "build" / "bin" / "llama-quantize"
+            if os.name == 'nt':  # Windows
+                build_bin_quantize_binary = path / "build" / "bin" / "llama-quantize.exe"
+                
+            if build_bin_quantize_binary.exists():
+                llama_cpp_dir = path
+                logger.info(f"Found llama.cpp directory at: {llama_cpp_dir} (build/bin directory)")
                 break
     
-    if llama_cpp_dir is None or not (llama_cpp_dir / "quantize").exists():
-        if os.name == 'nt' and not (llama_cpp_dir / "quantize.exe").exists():
-            raise ValueError(
-                "Could not find llama.cpp directory with quantize binary. Please specify it using --llama-cpp-dir. "
-                "Make sure you have built the quantize binary."
-            )
+    if llama_cpp_dir is None:
+        raise ValueError(
+            "Could not find llama.cpp directory with llama-quantize binary. Please specify it using --llama-cpp-dir. "
+            "Make sure you have built the llama-quantize binary using 'cmake .. && make llama-quantize'."
+        )
     
-    return llama_cpp_dir
+    # Check if the quantize binary exists in the specified directory or build directories
+    quantize_binary = llama_cpp_dir / "llama-quantize"
+    build_quantize_binary = llama_cpp_dir / "build" / "llama-quantize"
+    build_bin_quantize_binary = llama_cpp_dir / "build" / "bin" / "llama-quantize"
+    
+    if os.name == 'nt':  # Windows
+        quantize_binary = llama_cpp_dir / "llama-quantize.exe"
+        build_quantize_binary = llama_cpp_dir / "build" / "llama-quantize.exe"
+        build_bin_quantize_binary = llama_cpp_dir / "build" / "bin" / "llama-quantize.exe"
+    
+    if quantize_binary.exists():
+        return llama_cpp_dir, quantize_binary
+    elif build_quantize_binary.exists():
+        return llama_cpp_dir, build_quantize_binary
+    elif build_bin_quantize_binary.exists():
+        return llama_cpp_dir, build_bin_quantize_binary
+    else:
+        raise ValueError(
+            f"The llama-quantize binary was not found in the specified llama.cpp directory: {llama_cpp_dir} "
+            "or its build subdirectories. Make sure you have built the llama-quantize binary "
+            "using 'cmake .. && make llama-quantize'."
+        )
+    
 
 def parse_args():
     """Parse command line arguments."""
@@ -94,6 +130,25 @@ def parse_args():
     
     return parser.parse_args()
 
+def preprocess_gguf_file(input_file: Path) -> Tuple[Path, bool]:
+    """
+    Preprocess the GGUF file to add any missing keys required by the quantization tool.
+    
+    Args:
+        input_file: Path to the input GGUF file
+        
+    Returns:
+        Tuple of (processed_file_path, was_modified)
+    """
+    # For now, we'll just check if the file exists and return it as-is
+    # In the future, we could add preprocessing steps here if needed
+    if not input_file.exists():
+        raise FileNotFoundError(f"Model file not found: {input_file}")
+    
+    # We'll return the original file for now
+    # If we need to modify it in the future, we can create a temporary copy
+    return input_file, False
+
 def quantize_gguf_model(args):
     """
     Quantize a GGUF model using llama.cpp's quantize tool.
@@ -101,28 +156,28 @@ def quantize_gguf_model(args):
     Args:
         args: Command line arguments
     """
-    # Verify that the model file exists
-    if not args.model.exists():
-        logger.error(f"Model file not found: {args.model}")
+    # Verify that the model file exists and preprocess if needed
+    try:
+        input_file, was_preprocessed = preprocess_gguf_file(args.model)
+        if was_preprocessed:
+            logger.info(f"Preprocessed input file: {input_file}")
+    except Exception as e:
+        logger.error(f"Error preprocessing model file: {e}")
         return 1
     
     # Set up llama.cpp path
     try:
-        llama_cpp_dir = setup_llama_cpp_path(args.llama_cpp_dir)
+        llama_cpp_dir, quantize_binary = setup_llama_cpp_path(args.llama_cpp_dir)
         logger.info(f"Using llama.cpp directory: {llama_cpp_dir}")
+        logger.info(f"Using quantize binary: {quantize_binary}")
     except Exception as e:
         logger.error(f"Error setting up llama.cpp path: {e}")
         return 1
     
-    # Determine the quantize binary path
-    quantize_binary = llama_cpp_dir / "quantize"
-    if os.name == 'nt':  # Windows
-        quantize_binary = llama_cpp_dir / "quantize.exe"
-    
     # Ensure the quantize binary exists
     if not quantize_binary.exists():
         logger.error(f"Quantize binary not found at {quantize_binary}")
-        logger.error("Make sure you have built llama.cpp with the quantize target")
+        logger.error("Make sure you have built llama.cpp with the llama-quantize target")
         return 1
     
     # Determine output file path if not specified
@@ -159,10 +214,13 @@ def quantize_gguf_model(args):
         )
         
         # Stream the output
+        error_lines = []
         for line in iter(process.stdout.readline, ''):
             line = line.strip()
             if line:
                 logger.info(line)
+                if "failed" in line.lower() or "error" in line.lower():
+                    error_lines.append(line)
         
         process.stdout.close()
         return_code = process.wait()
@@ -174,6 +232,16 @@ def quantize_gguf_model(args):
             return 0
         else:
             logger.error(f"Quantization failed with return code {return_code}")
+            
+            # Check for specific error patterns and provide helpful messages
+            if any("key not found in model: llama.attention.layer_norm_rms_epsilon" in line for line in error_lines):
+                logger.error("\nError: Missing 'llama.attention.layer_norm_rms_epsilon' key in the GGUF file.")
+                logger.error("This is likely because the GGUF file was created with an older version of llama.cpp.")
+                logger.error("\nPossible solutions:")
+                logger.error("1. Update your safetensors_to_gguf.py script to add this parameter during conversion")
+                logger.error("2. Use an older version of llama.cpp's quantize tool that's compatible with your GGUF file")
+                logger.error("3. Regenerate the GGUF file with the latest version of llama.cpp")
+            
             return return_code
     
     except Exception as e:
