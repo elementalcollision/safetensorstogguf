@@ -91,3 +91,7 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 - [llama.cpp](https://github.com/ggerganov/llama.cpp) for the core conversion utilities
 - Hugging Face for the SafeTensors format
+
+## Current Limitations
+
+There seems to be some issues appearing with loading the Llama-4 model after conversion. This was tested on LM Studio and will require some additional work to ensure it functions correctly. Future updates will address these compatibility issues.
