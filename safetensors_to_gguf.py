@@ -157,7 +157,7 @@ def setup_llama_cpp_path(llama_cpp_dir=None):
                     logger.warning(f"Could not find context length in model config, using default: {context_length}")
                 
                 # Add the context length parameter to the GGUF file
-                self.gguf_writer.add_u32("llama.context_length", context_length)
+                self.gguf_writer.add_uint32("llama.context_length", context_length)
                 logger.info(f"Added context_length parameter: {context_length}")
             
             def set_vocab(self):
@@ -514,10 +514,19 @@ def convert_safetensors_to_gguf(args):
         import torch
         with torch.inference_mode():
             logger.info("Creating model instance...")
+            
+            # Ensure we have a valid output filename
+            outfile = args.outfile
+            if outfile is None:
+                # Generate a default output filename if none is provided
+                model_name = args.model_name or args.model.name
+                outfile = Path(f"{model_name}.gguf")
+                logger.info(f"No output file specified, using default: {outfile}")
+            
             model_instance = model_class(
                 args.model, 
                 output_type, 
-                args.outfile,
+                outfile,
                 is_big_endian=args.bigendian, 
                 use_temp_file=False,
                 eager=False,
