@@ -16,6 +16,8 @@ A toolkit for working with Hugging Face models and GGUF format for use with [lla
 - Supports various quantization types (q4_0, q4_k, q5_k, etc.)
 - Automatically names output files based on quantization type
 - Provides size comparison between original and quantized models
+- Special handling for Mixture of Experts (MoE) models
+- Model structure analysis to optimize quantization
 
 ## Requirements
 
@@ -95,6 +97,18 @@ python quantize_gguf.py --model /path/to/model.gguf --type q4_k
 python quantize_gguf.py --model /path/to/model.gguf --type q5_k --outfile /path/to/output-q5k.gguf
 ```
 
+### Model Structure Analysis (MoE Detection)
+
+```bash
+python quantize_gguf.py --model /path/to/model.gguf --analyze-model --type auto
+```
+
+### MoE-Specific Quantization
+
+```bash
+python quantize_gguf.py --model /path/to/model.gguf --type q4_k --moe-expert-quantization f16 --moe-router-quantization q8_0
+```
+
 ### Complete Conversion Pipeline
 
 ```bash
@@ -138,7 +152,22 @@ There seems to be some issues appearing with loading the Llama-4 model after con
 - `--model`: Path to the input GGUF model file (required)
 - `--outfile`: Path to write the output quantized GGUF file (default: same directory as input with quantization type suffix)
 - `--type`: Quantization type (default: q4_k)
-  - Options: q4_0, q4_1, q5_0, q5_1, q8_0, q8_1, q2_k, q3_k, q4_k, q5_k, q6_k, q8_k, f16, f32
+  - Standard options: q4_0, q4_1, q5_0, q5_1, q8_0
+  - K-quant options: q2_k, q3_k, q4_k, q5_k, q6_k
+  - IQ options: iq2_xxs, iq2_xs, iq3_xxs, iq3_xs, iq4_nl
+  - Full precision: f16, bf16, f32
+  - Special value: `auto` (use with `--analyze-model` for analysis-only mode)
 - `--threads`: Number of threads to use for quantization (default: number of CPU cores)
+- `--allow-requantize`: Allow requantizing tensors that have already been quantized
+- `--leave-output-tensor`: Leave output.weight unquantized (increases model size but may improve quality)
+- `--pure`: Disable k-quant mixtures and quantize all tensors to the same type
+- `--output-tensor-type`: Use this type for the output.weight tensor (f32, f16, q8_0, q4_0, q4_1)
+- `--token-embedding-type`: Use this type for the token embeddings tensor (f32, f16, q8_0, q4_0, q4_1)
+
+### MoE-Specific Options
+
+- `--analyze-model`: Analyze model structure before quantization to identify tensor distribution and MoE components
+- `--moe-expert-quantization`: Quantization type for MoE expert layers (f32, f16, q8_0, q4_0, q4_1, q5_k, q4_k, same)
+- `--moe-router-quantization`: Quantization type for MoE router layers (f32, f16, q8_0, q4_0, q4_1, q5_k, q4_k, same)
 - `--verbose`: Enable verbose logging
 - `--llama-cpp-dir`: Path to the llama.cpp directory (default: auto-detect)
