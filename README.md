@@ -1,14 +1,21 @@
 # SafeTensors to GGUF Converter
 
-A command-line tool to convert Hugging Face models in SafeTensors format to GGUF format for use with [llama.cpp](https://github.com/ggerganov/llama.cpp).
+A toolkit for working with Hugging Face models and GGUF format for use with [llama.cpp](https://github.com/ggerganov/llama.cpp). It includes tools to convert SafeTensors to GGUF and to quantize GGUF models to more efficient formats.
 
 ## Features
 
+### SafeTensors to GGUF Conversion
 - Converts SafeTensors model files to GGUF format
 - Supports Llama-4 models with Mixture of Experts (MoE) architecture
 - Handles multimodal models by skipping vision components
 - Supports custom tokenizer formats used in Llama-4
 - Automatically detects the llama.cpp directory or allows custom path specification
+
+### GGUF Quantization
+- Quantizes GGUF models to more efficient formats
+- Supports various quantization types (q4_0, q4_k, q5_k, etc.)
+- Automatically names output files based on quantization type
+- Provides size comparison between original and quantized models
 
 ## Requirements
 
@@ -30,11 +37,19 @@ A command-line tool to convert Hugging Face models in SafeTensors format to GGUF
 
 ## Usage
 
+### SafeTensors to GGUF Conversion
+
 ```bash
 python safetensors_to_gguf.py --model /path/to/model --outfile /path/to/output.gguf
 ```
 
-### Command Line Options
+### GGUF Quantization
+
+```bash
+python quantize_gguf.py --model /path/to/model.gguf --type q4_k
+```
+
+### SafeTensors to GGUF Command Line Options
 
 - `--model`: Path to the directory containing the model's SafeTensors files (required)
 - `--outfile`: Path to write the output GGUF file (default: model directory name with .gguf extension)
@@ -50,7 +65,7 @@ python safetensors_to_gguf.py --model /path/to/model --outfile /path/to/output.g
 
 ## Examples
 
-### Basic Conversion
+### Basic SafeTensors to GGUF Conversion
 
 ```bash
 python safetensors_to_gguf.py --model /path/to/Llama-4-Scout-17B-16E-Instruct
@@ -66,6 +81,28 @@ python safetensors_to_gguf.py --model /path/to/Llama-4-Scout-17B-16E-Instruct --
 
 ```bash
 python safetensors_to_gguf.py --model /path/to/Llama-4-Scout-17B-16E-Instruct --vocab-only
+```
+
+### Basic GGUF Quantization
+
+```bash
+python quantize_gguf.py --model /path/to/model.gguf --type q4_k
+```
+
+### GGUF Quantization with Custom Output Path
+
+```bash
+python quantize_gguf.py --model /path/to/model.gguf --type q5_k --outfile /path/to/output-q5k.gguf
+```
+
+### Complete Conversion Pipeline
+
+```bash
+# Step 1: Convert SafeTensors to GGUF
+python safetensors_to_gguf.py --model /path/to/Llama-4-Scout-17B-16E-Instruct
+
+# Step 2: Quantize the resulting GGUF file
+python quantize_gguf.py --model /path/to/Llama-4-Scout-17B-16E-Instruct.gguf --type q4_k
 ```
 
 ## Supported Models
@@ -95,3 +132,13 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 ## Current Limitations
 
 There seems to be some issues appearing with loading the Llama-4 model after conversion. This was tested on LM Studio and will require some additional work to ensure it functions correctly. Future updates will address these compatibility issues.
+
+## GGUF Quantization Command Line Options
+
+- `--model`: Path to the input GGUF model file (required)
+- `--outfile`: Path to write the output quantized GGUF file (default: same directory as input with quantization type suffix)
+- `--type`: Quantization type (default: q4_k)
+  - Options: q4_0, q4_1, q5_0, q5_1, q8_0, q8_1, q2_k, q3_k, q4_k, q5_k, q6_k, q8_k, f16, f32
+- `--threads`: Number of threads to use for quantization (default: number of CPU cores)
+- `--verbose`: Enable verbose logging
+- `--llama-cpp-dir`: Path to the llama.cpp directory (default: auto-detect)
