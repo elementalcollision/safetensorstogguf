@@ -233,14 +233,10 @@ def quantize_gguf_model(args):
         outfile = args.model.parent / f"{stem}-{args.type}.gguf"
         logger.info(f"No output file specified, using: {outfile}")
     
-    # Build the command
-    cmd = [str(quantize_binary), str(args.model), str(outfile), args.type]
+    # Build the command - llama-quantize expects options BEFORE the input/output files
+    cmd = [str(quantize_binary)]
     
-    # Add threads if specified
-    if args.threads:
-        cmd.extend([str(args.threads)])
-        
-    # Add optional flags
+    # Add optional flags first
     if args.allow_requantize:
         cmd.append("--allow-requantize")
         
@@ -255,6 +251,13 @@ def quantize_gguf_model(args):
         
     if args.token_embedding_type:
         cmd.extend(["--token-embedding-type", args.token_embedding_type])
+    
+    # Add input file, output file, and quantization type
+    cmd.extend([str(args.model), str(outfile), args.type])
+    
+    # Add threads as the last parameter if specified
+    if args.threads:
+        cmd.append(str(args.threads))
     
     # Execute the command
     logger.info(f"Running quantization command: {' '.join(cmd)}")
