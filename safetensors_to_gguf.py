@@ -131,12 +131,34 @@ def setup_llama_cpp_path(llama_cpp_dir=None):
             
             def set_gguf_parameters(self):
                 """Override to handle Llama-4 specific parameters"""
+                logger = logging.getLogger("safetensors-to-gguf")
+                
                 # Make sure vocab_size is set correctly
                 if "vocab_size" not in self.hparams and "text_config" in self.hparams and "vocab_size" in self.hparams["text_config"]:
                     self.hparams["vocab_size"] = self.hparams["text_config"]["vocab_size"]
                 
-                # Call the parent method
-                return super().set_gguf_parameters()
+                # Call the parent method to set standard parameters
+                super().set_gguf_parameters()
+                
+                # Add context length parameter
+                context_length = None
+                
+                # Try to get context length from max_position_embeddings in text_config
+                if "text_config" in self.hparams and "max_position_embeddings" in self.hparams["text_config"]:
+                    context_length = self.hparams["text_config"]["max_position_embeddings"]
+                    logger.info(f"Using max_position_embeddings from text_config as context_length: {context_length}")
+                # Fallback to max_position_embeddings in root config
+                elif "max_position_embeddings" in self.hparams:
+                    context_length = self.hparams["max_position_embeddings"]
+                    logger.info(f"Using max_position_embeddings as context_length: {context_length}")
+                # Fallback to a default value for Llama-4
+                else:
+                    context_length = 8192  # Default context length for Llama-4
+                    logger.warning(f"Could not find context length in model config, using default: {context_length}")
+                
+                # Add the context length parameter to the GGUF file
+                self.gguf_writer.add_u32("llama.context_length", context_length)
+                logger.info(f"Added context_length parameter: {context_length}")
             
             def set_vocab(self):
                 """Override to handle Llama-4 tokenizer"""
