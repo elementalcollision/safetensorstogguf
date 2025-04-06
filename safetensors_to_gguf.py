@@ -370,7 +370,7 @@ def parse_args():
     
     parser.add_argument(
         "--outfile", type=Path,
-        help="Path to write the output GGUF file (default: model directory name with .gguf extension)"
+        help="Path to write the output GGUF file (default: same directory as the model with model name and .gguf extension)"
     )
     
     parser.add_argument(
@@ -518,10 +518,11 @@ def convert_safetensors_to_gguf(args):
             # Ensure we have a valid output filename
             outfile = args.outfile
             if outfile is None:
-                # Generate a default output filename if none is provided
+                # Generate a default output filename in the same directory as the model
                 model_name = args.model_name or args.model.name
-                outfile = Path(f"{model_name}.gguf")
-                logger.info(f"No output file specified, using default: {outfile}")
+                # Use the model directory as the output directory
+                outfile = args.model / f"{model_name}.gguf"
+                logger.info(f"No output file specified, writing to model directory: {outfile}")
             
             model_instance = model_class(
                 args.model, 
