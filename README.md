@@ -19,6 +19,12 @@ A toolkit for working with Hugging Face models and GGUF format for use with [lla
 - Special handling for Mixture of Experts (MoE) models
 - Model structure analysis to optimize quantization
 
+### Two-Step Conversion and Quantization for MoE Models
+- Single script that handles both conversion and quantization in one command
+- Specifically designed for Llama-4 Scout and other MoE models
+- Creates uncompressed intermediate GGUF files (F16/F32) before quantization
+- Solves the issue of models that are already in a compressed format
+
 ## Requirements
 
 - Python 3.8 or higher
@@ -49,6 +55,12 @@ python safetensors_to_gguf.py --model /path/to/model --outfile /path/to/output.g
 
 ```bash
 python quantize_gguf.py --model /path/to/model.gguf --type q4_k
+```
+
+### Two-Step Conversion and Quantization for MoE Models
+
+```bash
+python convert_and_quantize.py --safetensors-dir /path/to/model --type q4_k
 ```
 
 ### SafeTensors to GGUF Command Line Options
@@ -109,7 +121,21 @@ python quantize_gguf.py --model /path/to/model.gguf --analyze-model --type auto
 python quantize_gguf.py --model /path/to/model.gguf --type q4_k --moe-expert-quantization f16 --moe-router-quantization q8_0
 ```
 
-### Complete Conversion Pipeline
+### Basic Two-Step Conversion and Quantization for MoE Models
+
+```bash
+python convert_and_quantize.py --safetensors-dir /path/to/Llama-4-Scout-17B-16E-Instruct --type q4_k
+```
+
+### Advanced Two-Step Conversion with Different Quantization Types
+
+```bash
+python convert_and_quantize.py --safetensors-dir /path/to/Llama-4-Scout-17B-16E-Instruct \
+  --intermediate-type f32 --type q5_k --moe-expert-quantization q8_0 --moe-router-quantization f16 \
+  --keep-intermediate --leave-output-tensor
+```
+
+### Complete Conversion Pipeline (Manual Method)
 
 ```bash
 # Step 1: Convert SafeTensors to GGUF
@@ -171,3 +197,21 @@ There seems to be some issues appearing with loading the Llama-4 model after con
 - `--moe-router-quantization`: Quantization type for MoE router layers (f32, f16, q8_0, q4_0, q4_1, q5_k, q4_k, same)
 - `--verbose`: Enable verbose logging
 - `--llama-cpp-dir`: Path to the llama.cpp directory (default: auto-detect)
+
+## Two-Step Conversion and Quantization Command Line Options
+
+- `--safetensors-dir`: Directory containing SafeTensors model files (required)
+- `--outfile`: Path to write the final quantized GGUF file
+- `--outdir`: Output directory for the final quantized GGUF model (if --outfile not specified)
+- `--type`: Quantization type for the final model (default: q4_k)
+- `--intermediate-type`: Format for the intermediate uncompressed GGUF file (f16, f32, default: f16)
+- `--moe-expert-quantization`: Quantization type for MoE expert layers
+- `--moe-router-quantization`: Quantization type for MoE router layers
+- `--llama-cpp-dir`: Path to llama.cpp directory (if not automatically detected)
+- `--keep-intermediate`: Keep the intermediate uncompressed GGUF file
+- `--verbose`: Enable verbose output
+- `--threads`: Number of threads to use for quantization
+- `--allow-requantize`: Allow requantizing tensors that are already quantized
+- `--leave-output-tensor`: Leave the output tensor in the original format (f16/f32)
+- `--output-tensor-type`: Output tensor type (f32, f16)
+- `--token-embedding-type`: Token embedding tensor type (f32, f16)
