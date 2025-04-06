@@ -159,6 +159,24 @@ def setup_llama_cpp_path(llama_cpp_dir=None):
                 # Add the context length parameter to the GGUF file
                 self.gguf_writer.add_uint32("llama.context_length", context_length)
                 logger.info(f"Added context_length parameter: {context_length}")
+                
+                # Add the layer_norm_rms_epsilon parameter required by newer llama.cpp versions
+                rms_norm_eps = 1e-5  # Default value for Llama-4
+                
+                # Try to get rms_norm_eps from text_config
+                if "text_config" in self.hparams and "rms_norm_eps" in self.hparams["text_config"]:
+                    rms_norm_eps = self.hparams["text_config"]["rms_norm_eps"]
+                    logger.info(f"Using rms_norm_eps from text_config: {rms_norm_eps}")
+                # Fallback to rms_norm_eps in root config
+                elif "rms_norm_eps" in self.hparams:
+                    rms_norm_eps = self.hparams["rms_norm_eps"]
+                    logger.info(f"Using rms_norm_eps from root config: {rms_norm_eps}")
+                else:
+                    logger.warning(f"Could not find rms_norm_eps in model config, using default: {rms_norm_eps}")
+                
+                # Add the layer_norm_rms_epsilon parameter to the GGUF file
+                self.gguf_writer.add_f32("llama.attention.layer_norm_rms_epsilon", rms_norm_eps)
+                logger.info(f"Added layer_norm_rms_epsilon parameter: {rms_norm_eps}")
             
             def set_vocab(self):
                 """Override to handle Llama-4 tokenizer"""
