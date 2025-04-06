@@ -423,16 +423,6 @@ def parse_args():
     )
     
     parser.add_argument(
-        "--optimize-for-size", action="store_true",
-        help="Optimize the conversion for smaller file size (may reduce precision)"
-    )
-    
-    parser.add_argument(
-        "--optimize-output-tensor", action="store_true",
-        help="Apply special optimization to the output tensor (may reduce size)"
-    )
-    
-    parser.add_argument(
         "--optimize-token-embeddings", action="store_true",
         help="Apply special optimization to the token embeddings (may reduce size)"
     )
