@@ -175,7 +175,7 @@ def setup_llama_cpp_path(llama_cpp_dir=None):
                     logger.warning(f"Could not find rms_norm_eps in model config, using default: {rms_norm_eps}")
                 
                 # Add the layer_norm_rms_epsilon parameter to the GGUF file
-                self.gguf_writer.add_f32("llama.attention.layer_norm_rms_epsilon", rms_norm_eps)
+                self.gguf_writer.add_float32("llama.attention.layer_norm_rms_epsilon", rms_norm_eps)
                 logger.info(f"Added layer_norm_rms_epsilon parameter: {rms_norm_eps}")
             
             def set_vocab(self):
