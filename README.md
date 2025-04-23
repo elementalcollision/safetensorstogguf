@@ -31,6 +31,29 @@ A toolkit for working with Hugging Face models and GGUF format for use with [lla
 - PyTorch
 - Access to llama.cpp repository (either as a parent directory or specified via command line)
 
+## Project Structure and File Map
+
+This toolkit is organized as a set of standalone CLI utilities and supporting files. Below is a breakdown of each file, its purpose, and its dependencies:
+
+| File                        | Purpose                                                                 | Key Dependencies                |
+|-----------------------------|-------------------------------------------------------------------------|----------------------------------|
+| `safetensors_to_gguf.py`    | Main CLI tool to convert SafeTensors models to GGUF format. Handles Llama-4 and MoE specifics. | Python stdlib, `numpy`, `llama.cpp` Python modules (`gguf`), access to `llama.cpp` repo |
+| `convert_and_quantize.py`   | Two-step CLI tool for MoE models: converts SafeTensors to uncompressed GGUF, then quantizes. Calls `safetensors_to_gguf.py` and uses `llama-quantize` binary. | Python stdlib, `numpy`, subprocess, `llama.cpp` binaries, `safetensors_to_gguf.py` |
+| `quantize_gguf.py`          | CLI tool to quantize GGUF models using `llama.cpp`'s quantization utilities. | Python stdlib, `numpy`, subprocess, `llama.cpp` binaries |
+| `analyze_gguf.py`           | CLI tool to analyze GGUF model structure using the `gguf` Python module. | Python stdlib, `numpy`, `llama.cpp` Python modules (`gguf`) |
+| `analyze_gguf_simple.py`    | Simpler GGUF analyzer using the `llama-quantize` binary for tensor info. | Python stdlib, `numpy`, subprocess, `llama.cpp` binaries |
+| `analyze_model.py`          | Analyzes GGUF model structure, especially for MoE detection, using the `llama-quantize` binary. | Python stdlib, `numpy`, subprocess, `llama.cpp` binaries |
+| `model_analysis.json`       | (Optional) Stores model analysis results. Used for reference or output. | -                                |
+| `LICENSE`, `.gitignore`     | Standard project files.                                                 | -                                |
+| `README.md`                 | Project documentation and usage instructions.                           | -                                |
+
+### Dependency Notes
+- **llama.cpp**: Most scripts require access to the [llama.cpp](https://github.com/ggerganov/llama.cpp) repository, both for Python modules (e.g., `gguf`) and for binaries (e.g., `llama-quantize`).
+- **numpy**: Used for tensor and model analysis in several scripts.
+- **No direct inter-script imports**: Scripts do not import each other as Python modules, but some (e.g., `convert_and_quantize.py`) may call others as subprocesses or by path.
+
+This mapping should help users understand the role of each file and how the tools fit together in the SafeTensors-to-GGUF and quantization workflow.
+
 ## Installation
 
 1. Clone this repository:
