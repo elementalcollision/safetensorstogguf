@@ -18,12 +18,9 @@ from pathlib import Path
 from typing import List, Optional, Dict, Any, Tuple
 from collections import Counter, defaultdict
 
-# Configure logging
+# Logging is configured via logging.basicConfig() in main(); fetch the named
+# logger here without attaching a second handler (which would double every line).
 logger = logging.getLogger("quantize-gguf")
-handler = logging.StreamHandler()
-formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-handler.setFormatter(formatter)
-logger.addHandler(handler)
 
 def setup_llama_cpp_path(llama_cpp_dir=None):
     """Set up the llama.cpp path"""

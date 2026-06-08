@@ -22,12 +22,9 @@ Model = None
 LlamaModel = None
 Llama4Model = None
 
-# Configure logging
+# Logging is configured via logging.basicConfig() in main(); fetch the named
+# logger here without attaching a second handler (which would double every line).
 logger = logging.getLogger("safetensors-to-gguf")
-handler = logging.StreamHandler()
-formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-handler.setFormatter(formatter)
-logger.addHandler(handler)
 
 def setup_llama_cpp_path(llama_cpp_dir=None):
     """Set up the llama.cpp path and import necessary modules"""
@@ -394,17 +391,17 @@ def parse_args():
     parser.add_argument(
         "--outtype", type=str, choices=[
             # Full precision
-            "f32", "f16", "bf16", 
-            # Standard quantization
-            "q8_0", "q5_0", "q5_1", "q4_0", "q4_1", 
-            # K-quant types
-            "q2_k", "q3_k", "q4_k", "q5_k", "q6_k",
+            "f32", "f16", "bf16",
+            # Single quantization type supported directly by the converter
+            "q8_0",
             # Ternary quantization
-            "tq1_0", "tq2_0", 
+            "tq1_0", "tq2_0",
             # Auto detection
             "auto"
         ], default="auto",
-        help="Output data type (default: auto, which tries to detect from the model)"
+        help="Output data type for conversion (default: auto). For k-quants "
+             "(q4_k, q5_k, ...) and other formats, first convert to f16/f32 here, "
+             "then run quantize_gguf.py on the result."
     )
     
     parser.add_argument(

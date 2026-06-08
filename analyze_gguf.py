@@ -81,7 +81,8 @@ def analyze_gguf_model(model_path):
             tensor_name = tensor.name
             tensor_type = tensor.tensor_type
             tensor_shape = tensor.shape
-            tensor_size = np.prod(tensor_shape) * gguf.get_type_size(tensor_type)
+            # Use int64 to avoid overflow when multiplying large tensor dimensions
+            tensor_size = int(np.prod(tensor_shape, dtype=np.int64)) * gguf.get_type_size(tensor_type)
             total_size += tensor_size
             
             # Update tensor type statistics
