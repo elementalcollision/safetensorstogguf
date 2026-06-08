@@ -12,13 +12,11 @@ import logging
 import os
 import sys
 import subprocess
-import tempfile
-import shutil
 import json
 import re
 from pathlib import Path
-from typing import List, Optional, Dict, Any, Tuple, Counter
-from collections import defaultdict
+from typing import List, Optional, Dict, Any, Tuple
+from collections import Counter, defaultdict
 
 # Configure logging
 logger = logging.getLogger("quantize-gguf")
@@ -173,14 +171,14 @@ def parse_args():
         "--moe-expert-quantization", type=str,
         choices=["f32", "f16", "q8_0", "q4_0", "q4_1", "q5_k", "q4_k", "same"],
         default="same",
-        help="Quantization type for MoE expert layers (default: same as main quantization)"
+        help="Quantization type for MoE expert layers (NOTE: not supported by upstream llama-quantize; currently ignored)"
     )
-    
+
     parser.add_argument(
         "--moe-router-quantization", type=str,
         choices=["f32", "f16", "q8_0", "q4_0", "q4_1", "q5_k", "q4_k", "same"],
         default="same",
-        help="Quantization type for MoE router layers (default: same as main quantization)"
+        help="Quantization type for MoE router layers (NOTE: not supported by upstream llama-quantize; currently ignored)"
     )
     
     parser.add_argument(
@@ -477,10 +475,10 @@ def quantize_gguf_model(args):
     # Analyze model structure if requested
     model_analysis = None
     has_moe = False
-    if args.analyze_model or args.moe_expert_quantization != "same" or args.moe_router_quantization != "same":
-        logger.info("Analyzing model structure to detect MoE components and optimize quantization...")
+    if args.analyze_model:
+        logger.info("Analyzing model structure to detect MoE components...")
         model_analysis = analyze_model_structure(args.model, args.verbose)
-        
+
         if "error" in model_analysis:
             logger.warning(f"Model analysis failed: {model_analysis['error']}")
             logger.warning("Continuing with standard quantization...")
@@ -489,12 +487,6 @@ def quantize_gguf_model(args):
             if has_moe:
                 logger.info("Detected Mixture of Experts (MoE) architecture in the model")
                 logger.info(f"Found {len(model_analysis.get('moe_tensors', []))} MoE-related tensors")
-                
-                # Log MoE quantization settings
-                if args.moe_expert_quantization != "same":
-                    logger.info(f"Using {args.moe_expert_quantization} quantization for expert layers")
-                if args.moe_router_quantization != "same":
-                    logger.info(f"Using {args.moe_router_quantization} quantization for router layers")
     
     # Set up llama.cpp path
     try:
@@ -545,49 +537,23 @@ def quantize_gguf_model(args):
     if args.token_embedding_type:
         cmd.extend(["--token-embedding-type", args.token_embedding_type])
     
-    # Check if we need to use the advanced MoE-specific quantization approach
-    use_advanced_moe_quantization = False
-    
     # Force MoE detection for models with Scout or MoE in their name
     model_name = args.model.name.lower()
     if "scout" in model_name or "moe" in model_name:
         has_moe = True
         logger.info(f"Forcing MoE detection based on model name: {args.model.name}")
-    
-    if has_moe and (args.moe_expert_quantization != "same" or args.moe_router_quantization != "same"):
-        # We'll use advanced MoE quantization if:
-        # 1. The model has MoE architecture
-        # 2. User requested different quantization for experts or routers
-        
-        # If model analysis failed but we know it's an MoE model, create dummy tensor lists
-        expert_tensors = []
-        router_tensors = []
-        
-        if model_analysis and "expert_tensors" in model_analysis and "router_tensors" in model_analysis:
-            expert_tensors = model_analysis["expert_tensors"]
-            router_tensors = model_analysis["router_tensors"]
-        
-        # If we don't have any tensors from analysis but know it's an MoE model,
-        # create dummy tensors based on common patterns in Llama-4 Scout
-        if len(expert_tensors) == 0 and len(router_tensors) == 0 and has_moe:
-            logger.info("Creating synthetic tensor lists for MoE model based on common patterns")
-            
-            # Create patterns for expert and router tensors based on Llama-4 Scout structure
-            for i in range(48):  # Typical number of blocks in Llama models
-                for j in range(16):  # Typical number of experts in Scout
-                    expert_tensors.append({"name": f"blk.{i}.ffn_expert.{j}.w1"})
-                    expert_tensors.append({"name": f"blk.{i}.ffn_expert.{j}.w2"})
-                    expert_tensors.append({"name": f"blk.{i}.ffn_expert.{j}.w3"})
-                router_tensors.append({"name": f"blk.{i}.ffn_gate"})
-                router_tensors.append({"name": f"blk.{i}.ffn_router"})
-            
-            logger.info(f"Created {len(expert_tensors)} synthetic expert tensors and {len(router_tensors)} synthetic router tensors")
-        
-        # Enable advanced MoE quantization if we have expert or router tensors
-        if len(expert_tensors) > 0 or len(router_tensors) > 0:
-            use_advanced_moe_quantization = True
-            logger.info("Using advanced MoE-specific quantization with selective tensor quantization")
-    
+
+    # Selective per-tensor quantization for experts/routers is not supported by
+    # upstream llama-quantize. Honour the request with a clear warning instead of
+    # emitting flags that would make llama-quantize fail.
+    if args.moe_expert_quantization != "same" or args.moe_router_quantization != "same":
+        logger.warning(
+            "--moe-expert-quantization/--moe-router-quantization are not supported by "
+            f"llama-quantize and will be ignored; all tensors use --type {args.type}. "
+            "For the tensor-specific control llama-quantize does support, use "
+            "--output-tensor-type and --token-embedding-type."
+        )
+
     # Add MoE-specific optimizations using supported parameters
     if has_moe:
         logger.info("Applying MoE-specific quantization settings")
@@ -611,210 +577,7 @@ def quantize_gguf_model(args):
             logger.info("Recommending a k-quant type for better quality with MoE models")
             logger.info("Consider using --type q4_k or --type q5_k instead")
     
-    # If we're using advanced MoE quantization, we need a multi-pass approach
-    if use_advanced_moe_quantization:
-        logger.info("Using simplified multi-pass quantization for MoE model")
-        
-        # First, let's create a working directory for our intermediate files
-        with tempfile.TemporaryDirectory() as temp_dir:
-            temp_dir_path = Path(temp_dir)
-            
-            # Determine quantization types to use
-            base_quant_type = args.type
-            expert_quant_type = args.moe_expert_quantization if args.moe_expert_quantization != "same" else base_quant_type
-            router_quant_type = args.moe_router_quantization if args.moe_router_quantization != "same" else base_quant_type
-            
-            logger.info(f"Using quantization types: base={base_quant_type}, experts={expert_quant_type}, routers={router_quant_type}")
-            
-            # Prepare the final output file name with a special suffix indicating MoE quantization
-            if args.outfile is None:
-                stem = args.model.stem
-                # Remove any existing quantization suffix
-                for q_type in ["q4_0", "q4_1", "q5_0", "q5_1", "q8_0", "q8_1", 
-                              "q2_k", "q3_k", "q4_k", "q5_k", "q6_k", "q8_k"]:
-                    if stem.endswith(f"-{q_type}"):
-                        stem = stem[:-len(f"-{q_type}")]
-                        break
-                
-                # Create a special suffix for MoE models
-                moe_suffix = f"moe-mix-{base_quant_type}-{expert_quant_type}-{router_quant_type}"
-                outfile = args.model.parent / f"{stem}-{moe_suffix}.gguf"
-            else:
-                outfile = args.outfile
-            
-            logger.info(f"Final output file will be: {outfile}")
-            
-            # Create pattern files for expert and router tensors
-            # These will use regex patterns that match common tensor naming in MoE models
-            expert_patterns_file = temp_dir_path / "expert_patterns.txt"
-            router_patterns_file = temp_dir_path / "router_patterns.txt"
-            
-            # Common patterns for expert tensors in MoE models
-            expert_patterns = [
-                ".*ffn_expert.*",
-                ".*ffn_up_proj.*",
-                ".*ffn_down_proj.*",
-                ".*expert.*w[123].*",
-                ".*moe.*w[123].*",
-                ".*w[123].*expert.*"
-            ]
-            
-            # Common patterns for router tensors in MoE models
-            router_patterns = [
-                ".*router.*",
-                ".*gate.*",
-                ".*routing.*",
-                ".*ffn_gate.*"
-            ]
-            
-            with open(expert_patterns_file, "w") as f:
-                f.write("\n".join(expert_patterns))
-            
-            with open(router_patterns_file, "w") as f:
-                f.write("\n".join(router_patterns))
-            
-            logger.info(f"Created pattern files for expert and router tensors")
-            
-            # Create a simpler approach: use a single quantization command with special parameters
-            # that tell llama-quantize to use different quantization types for different tensor groups
-            
-            # Build the command
-            quant_cmd = [str(quantize_binary)]
-            
-            # Add all the base options
-            if args.allow_requantize:
-                quant_cmd.append("--allow-requantize")
-            if args.leave_output_tensor:
-                quant_cmd.append("--leave-output-tensor")
-            if args.output_tensor_type:
-                quant_cmd.extend(["--output-tensor-type", args.output_tensor_type])
-            if args.token_embedding_type:
-                quant_cmd.extend(["--token-embedding-type", args.token_embedding_type])
-            
-            # Add special MoE-specific options
-            # Note: llama-quantize doesn't actually support these options yet, but we'll add them
-            # to make it clear what we're trying to do. In the future, llama.cpp might add support
-            # for these options, at which point this code would work without modification.
-            quant_cmd.append("--moe-quantize")
-            quant_cmd.extend(["--expert-quant", expert_quant_type])
-            quant_cmd.extend(["--router-quant", router_quant_type])
-            
-            # Add input, output, and base quantization type
-            quant_cmd.extend([str(args.model), str(outfile), base_quant_type])
-            
-            # Add threads if specified
-            if args.threads:
-                quant_cmd.append(str(args.threads))
-            
-            logger.info(f"Running MoE-aware quantization command: {' '.join(quant_cmd)}")
-            logger.info("Note: This command uses experimental MoE-specific options that may not be supported by your version of llama.cpp.")
-            logger.info("If quantization fails, please update to the latest version of llama.cpp or use standard quantization instead.")
-            
-            # Execute the command
-            quant_process = subprocess.Popen(
-                quant_cmd, 
-                stdout=subprocess.PIPE, 
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1
-            )
-            
-            # Stream the output
-            quant_error_lines = []
-            for line in iter(quant_process.stdout.readline, ''):
-                line = line.strip()
-                if line:
-                    logger.info(f"[MoE Quant] {line}")
-                    if "failed" in line.lower() or "error" in line.lower():
-                        quant_error_lines.append(line)
-            
-            quant_process.stdout.close()
-            quant_return_code = quant_process.wait()
-            
-            # If the MoE-specific quantization failed, fall back to standard quantization
-            if quant_return_code != 0:
-                logger.warning(f"MoE-specific quantization failed with return code {quant_return_code}")
-                logger.warning("This is likely because your version of llama.cpp doesn't support the MoE-specific options.")
-                logger.warning("Falling back to standard quantization with the base quantization type.")
-                
-                # Build a standard quantization command
-                std_cmd = [str(quantize_binary)]
-                
-                # Add all the base options
-                if args.allow_requantize:
-                    std_cmd.append("--allow-requantize")
-                if args.leave_output_tensor:
-                    std_cmd.append("--leave-output-tensor")
-                if args.output_tensor_type:
-                    std_cmd.extend(["--output-tensor-type", args.output_tensor_type])
-                if args.token_embedding_type:
-                    std_cmd.extend(["--token-embedding-type", args.token_embedding_type])
-                
-                # Add input, output, and quantization type
-                std_cmd.extend([str(args.model), str(outfile), base_quant_type])
-                
-                # Add threads if specified
-                if args.threads:
-                    std_cmd.append(str(args.threads))
-                
-                logger.info(f"Running standard quantization command: {' '.join(std_cmd)}")
-                
-                # Execute the command
-                std_process = subprocess.Popen(
-                    std_cmd, 
-                    stdout=subprocess.PIPE, 
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    bufsize=1
-                )
-                
-                # Stream the output
-                std_error_lines = []
-                for line in iter(std_process.stdout.readline, ''):
-                    line = line.strip()
-                    if line:
-                        logger.info(f"[Standard Quant] {line}")
-                        if "failed" in line.lower() or "error" in line.lower():
-                            std_error_lines.append(line)
-                
-                std_process.stdout.close()
-                std_return_code = std_process.wait()
-                
-                if std_return_code != 0:
-                    logger.error(f"Standard quantization failed with return code {std_return_code}")
-                    for line in std_error_lines:
-                        logger.error(line)
-                    return std_return_code
-            
-            # Check if the final output file exists and has a reasonable size
-            if outfile.exists() and outfile.stat().st_size > 0:
-                logger.info(f"Quantization completed successfully. Output file: {outfile}")
-                logger.info(f"Original size: {args.model.stat().st_size / (1024 * 1024):.2f} MB")
-                logger.info(f"Quantized size: {outfile.stat().st_size / (1024 * 1024):.2f} MB")
-                
-                # Calculate compression ratio
-                original_size = args.model.stat().st_size
-                quantized_size = outfile.stat().st_size
-                compression_ratio = original_size / quantized_size if quantized_size > 0 else 0
-                
-                logger.info(f"Compression ratio: {compression_ratio:.2f}x")
-                
-                if abs(original_size - quantized_size) / original_size < 0.05:
-                    logger.warning("WARNING: The quantized model is almost the same size as the original model.")
-                    logger.warning("This suggests that quantization may not have been effective.")
-                    logger.warning("Consider checking if the model was already quantized or if there are issues with the quantization process.")
-                    logger.warning("For MoE models like Llama-4 Scout, this may indicate that the model is already in a compressed format.")
-                    logger.warning("Try using the original SafeTensors files and converting them to GGUF with explicit F16 or F32 format first.")
-                
-                return 0
-            else:
-                logger.error("Failed to create the final quantized model file")
-                return 1
-        
-        # Return early since we've already handled the quantization
-        return 0
-    
-    # Standard single-pass quantization for non-MoE models or when not using advanced MoE quantization
+    # Single-pass quantization using llama-quantize
     # Add input file, output file, and quantization type
     cmd.extend([str(args.model), str(outfile), args.type])
     
@@ -900,9 +663,9 @@ def main():
                 logger.info("\n===== Quantization Recommendations for MoE Model =====")
                 logger.info("This model contains Mixture of Experts (MoE) architecture.")
                 logger.info("Recommended quantization settings:")
-                logger.info("  1. For better quality: --type q5_k --leave-output-tensor --moe-expert-quantization f16")
-                logger.info("  2. For better compression: --type q4_k_m --moe-expert-quantization q8_0")
-                logger.info("  3. For balanced approach: --type q4_k --moe-router-quantization f16")
+                logger.info("  1. For better quality: --type q5_k --leave-output-tensor --token-embedding-type f16")
+                logger.info("  2. For better compression: --type q4_k_m")
+                logger.info("  3. For balanced approach: --type q4_k --output-tensor-type f16")
             else:
                 logger.info("\n===== Quantization Recommendations =====")
                 logger.info("  1. For better quality: --type q5_k --leave-output-tensor")
