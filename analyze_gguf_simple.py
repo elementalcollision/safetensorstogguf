@@ -11,6 +11,28 @@ import struct
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("analyze-gguf-simple")
 
+def find_quantize_binary(llama_cpp_dir=None):
+    """Locate the llama-quantize binary.
+
+    Resolution order: explicit --llama-cpp-dir, then the LLAMA_CPP_DIR
+    environment variable, then directories relative to this script.
+    """
+    binary_name = "llama-quantize.exe" if os.name == "nt" else "llama-quantize"
+    candidate_dirs = []
+    if llama_cpp_dir:
+        candidate_dirs.append(Path(llama_cpp_dir))
+    if os.environ.get("LLAMA_CPP_DIR"):
+        candidate_dirs.append(Path(os.environ["LLAMA_CPP_DIR"]))
+    script_dir = Path(os.path.dirname(os.path.abspath(__file__)))
+    candidate_dirs.extend([script_dir.parent.parent, script_dir.parent, script_dir])
+
+    for base in candidate_dirs:
+        for rel in (Path("build") / "bin" / binary_name, Path("build") / binary_name, Path(binary_name)):
+            candidate = base / rel
+            if candidate.exists():
+                return candidate
+    return None
+
 def get_type_size(tensor_type):
     """Get the size in bytes for a given tensor type"""
     # Mapping of tensor types to their sizes in bytes
@@ -35,18 +57,27 @@ def get_type_size(tensor_type):
     }
     return type_sizes.get(tensor_type, 4)  # Default to F32 if type is unknown
 
-def analyze_gguf_model(model_path):
+def analyze_gguf_model(model_path, llama_cpp_dir=None):
     """
     Analyze a GGUF model file and print detailed information about its structure.
-    
+
     Args:
         model_path: Path to the GGUF model file
+        llama_cpp_dir: Optional path to the llama.cpp directory
     """
     logger.info(f"Analyzing GGUF model: {model_path}")
-    
+
     # Check if the file exists
     if not os.path.exists(model_path):
         logger.error(f"File not found: {model_path}")
+        return
+
+    quantize_binary = find_quantize_binary(llama_cpp_dir)
+    if quantize_binary is None:
+        logger.error(
+            "Could not find the llama-quantize binary. Pass --llama-cpp-dir or set "
+            "the LLAMA_CPP_DIR environment variable to your llama.cpp checkout."
+        )
         return
     
     # Get file size
@@ -56,7 +87,7 @@ def analyze_gguf_model(model_path):
     # Use llama-quantize to get tensor information
     try:
         import subprocess
-        cmd = ["/Users/dave/llama.cpp/build/bin/llama-quantize", "--dry-run", "--verbose", model_path, "/dev/null", "q4_0"]
+        cmd = [str(quantize_binary), "--dry-run", "--verbose", model_path, "/dev/null", "q4_0"]
         result = subprocess.run(cmd, capture_output=True, text=True)
         
         if result.returncode != 0:
@@ -209,9 +240,10 @@ def analyze_gguf_model(model_path):
 def main():
     parser = argparse.ArgumentParser(description="Analyze GGUF model structure")
     parser.add_argument("--model", type=str, required=True, help="Path to the GGUF model file")
+    parser.add_argument("--llama-cpp-dir", type=str, help="Path to the llama.cpp directory (default: auto-detect)")
     args = parser.parse_args()
-    
-    analyze_gguf_model(args.model)
+
+    analyze_gguf_model(args.model, args.llama_cpp_dir)
 
 if __name__ == "__main__":
     main()

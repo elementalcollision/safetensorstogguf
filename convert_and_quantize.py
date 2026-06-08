@@ -31,13 +31,15 @@ def setup_llama_cpp_path(llama_cpp_dir=None):
     if llama_cpp_dir is None:
         # Try to find it relative to the script location
         script_dir = Path(os.path.dirname(os.path.abspath(__file__)))
-        possible_paths = [
+        possible_paths = []
+        if os.environ.get("LLAMA_CPP_DIR"):
+            possible_paths.append(Path(os.environ["LLAMA_CPP_DIR"]))
+        possible_paths.extend([
             script_dir.parent.parent,  # If script is in llama.cpp/some_dir/safetensors-to-gguf
             script_dir.parent,         # If script is in llama.cpp/safetensors-to-gguf
             script_dir,                # If script is directly in llama.cpp
-            Path("/Users/dave/llama.cpp")  # Direct path to llama.cpp
-        ]
-        
+        ])
+
         for path in possible_paths:
             # Check for the binary in the main directory
             convert_binary = path / "convert-safetensors-to-gguf.py"

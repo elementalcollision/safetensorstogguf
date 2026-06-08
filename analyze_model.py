@@ -27,14 +27,18 @@ def analyze_model_structure(model_path, llama_cpp_dir=None):
     
     # Find llama-quantize binary
     if llama_cpp_dir is None:
-        # Try to find it relative to the script location
+        # Try the LLAMA_CPP_DIR environment variable, then locations relative to
+        # the script.
         script_dir = Path(os.path.dirname(os.path.abspath(__file__)))
-        possible_paths = [
+        possible_paths = []
+        if os.environ.get("LLAMA_CPP_DIR"):
+            possible_paths.append(Path(os.environ["LLAMA_CPP_DIR"]))
+        possible_paths.extend([
             script_dir.parent.parent,  # If script is in llama.cpp/some_dir/safetensors-to-gguf
             script_dir.parent,         # If script is in llama.cpp/safetensors-to-gguf
-            Path("/Users/dave/llama.cpp")  # Direct path to llama.cpp
-        ]
-        
+            script_dir,                # If script is directly in llama.cpp
+        ])
+
         for path in possible_paths:
             quantize_binary = path / "build" / "bin" / "llama-quantize"
             if quantize_binary.exists():
