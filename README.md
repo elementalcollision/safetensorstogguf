@@ -28,8 +28,10 @@ A toolkit for working with Hugging Face models and GGUF format for use with [lla
 ## Requirements
 
 - Python 3.8 or higher
-- PyTorch
+- Python packages: `numpy`, `torch`, `transformers`, `safetensors`, `sentencepiece` (install via `pip install -r requirements.txt`)
 - Access to llama.cpp repository (either as a parent directory or specified via command line)
+
+> **Why `transformers`?** `safetensors_to_gguf.py` delegates the actual conversion to llama.cpp's `convert_hf_to_gguf.py`, which imports `transformers`, `safetensors`, and `sentencepiece`. If these are not installed you will see errors such as `No module named 'transformers'`, even though this repo's own scripts don't import them directly.
 
 ## Project Structure and File Map
 
@@ -50,6 +52,7 @@ This toolkit is organized as a set of standalone CLI utilities and supporting fi
 ### Dependency Notes
 - **llama.cpp**: Most scripts require access to the [llama.cpp](https://github.com/ggerganov/llama.cpp) repository, both for Python modules (e.g., `gguf`) and for binaries (e.g., `llama-quantize`).
 - **numpy**: Used for tensor and model analysis in several scripts.
+- **transformers / safetensors / sentencepiece**: Required transitively by llama.cpp's `convert_hf_to_gguf.py`, which `safetensors_to_gguf.py` loads to perform the conversion. Install them via `requirements.txt`.
 - **No direct inter-script imports**: Scripts do not import each other as Python modules, but some (e.g., `convert_and_quantize.py`) may call others as subprocesses or by path.
 
 This mapping should help users understand the role of each file and how the tools fit together in the SafeTensors-to-GGUF and quantization workflow.
@@ -58,11 +61,16 @@ This mapping should help users understand the role of each file and how the tool
 
 1. Clone this repository:
    ```bash
-   git clone https://github.com/yourusername/safetensors-to-gguf.git
-   cd safetensors-to-gguf
+   git clone https://github.com/elementalcollision/safetensorstogguf.git
+   cd safetensorstogguf
    ```
 
-2. Make sure you have access to the llama.cpp repository. You can either:
+2. Install the Python dependencies (a virtual environment is recommended):
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+3. Make sure you have access to the llama.cpp repository. You can either:
    - Clone llama.cpp in a parent directory
    - Specify the path to llama.cpp using the `--llama-cpp-dir` parameter
 
