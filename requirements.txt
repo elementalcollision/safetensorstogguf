@@ -1,0 +1,21 @@
+# Python dependencies for the SafeTensors to GGUF toolkit.
+#
+# Install with:
+#     pip install -r requirements.txt
+#
+# Note: safetensors_to_gguf.py delegates the actual conversion to llama.cpp's
+# convert_hf_to_gguf.py, which imports `transformers`, `safetensors`, and
+# `sentencepiece` at load time. Those are listed here even though this repo's
+# own scripts do not import them directly, because the converter will fail with
+# "No module named 'transformers'" without them.
+
+numpy
+torch
+transformers
+safetensors
+sentencepiece
+
+# `gguf` ships with the llama.cpp repository. If you have llama.cpp checked out
+# (required anyway, see README), its gguf module is imported from there. To
+# install it standalone instead, uncomment the line below:
+# gguf
