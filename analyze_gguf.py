@@ -11,14 +11,30 @@ import numpy as np
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("analyze-gguf")
 
-# Add the llama.cpp/gguf directory to the Python path
-sys.path.append(str(Path("/Users/dave/llama.cpp")))
-sys.path.append(str(Path("/Users/dave/llama.cpp/gguf")))
+# Make the gguf Python module importable. Prefer an installed `gguf` package;
+# otherwise fall back to a llama.cpp checkout located via the LLAMA_CPP_DIR
+# environment variable or directories relative to this script.
+def _add_gguf_to_path():
+    candidate_dirs = []
+    if os.environ.get("LLAMA_CPP_DIR"):
+        candidate_dirs.append(Path(os.environ["LLAMA_CPP_DIR"]))
+    script_dir = Path(os.path.dirname(os.path.abspath(__file__)))
+    candidate_dirs.extend([script_dir.parent.parent, script_dir.parent, script_dir])
+    for base in candidate_dirs:
+        gguf_py = base / "gguf-py"
+        if (gguf_py / "gguf").is_dir():
+            sys.path.insert(0, str(gguf_py))
+            return
+
+_add_gguf_to_path()
 
 try:
     import gguf
 except ImportError:
-    logger.error("Could not import gguf module. Make sure the llama.cpp/gguf directory is in your Python path.")
+    logger.error(
+        "Could not import the gguf module. Install it with `pip install gguf`, or set "
+        "LLAMA_CPP_DIR to a llama.cpp checkout that contains gguf-py."
+    )
     sys.exit(1)
 
 def analyze_gguf_model(model_path):

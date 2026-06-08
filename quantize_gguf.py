@@ -33,13 +33,15 @@ def setup_llama_cpp_path(llama_cpp_dir=None):
     if llama_cpp_dir is None:
         # Try to find it relative to the script location
         script_dir = Path(os.path.dirname(os.path.abspath(__file__)))
-        possible_paths = [
+        possible_paths = []
+        if os.environ.get("LLAMA_CPP_DIR"):
+            possible_paths.append(Path(os.environ["LLAMA_CPP_DIR"]))
+        possible_paths.extend([
             script_dir.parent.parent,  # If script is in llama.cpp/some_dir/safetensors-to-gguf
             script_dir.parent,         # If script is in llama.cpp/safetensors-to-gguf
             script_dir,                # If script is directly in llama.cpp
-            Path("/Users/dave/llama.cpp")  # Direct path to llama.cpp
-        ]
-        
+        ])
+
         for path in possible_paths:
             # Check for the binary in the main directory
             quantize_binary = path / "llama-quantize"
@@ -210,15 +212,17 @@ def analyze_model_structure(input_file: Path, verbose: bool = False) -> Dict[str
     # Run llama-gguf to extract model information
     try:
         # Find llama-quantize binary for model analysis
-        llama_cpp_dir = Path(os.path.dirname(os.path.abspath(__file__)))
+        script_dir = Path(os.path.dirname(os.path.abspath(__file__)))
+        search_bases = []
+        if os.environ.get("LLAMA_CPP_DIR"):
+            search_bases.append(Path(os.environ["LLAMA_CPP_DIR"]))
+        search_bases.extend([script_dir.parent.parent, script_dir.parent, script_dir])
         quantize_paths = [
-            llama_cpp_dir.parent / "build" / "bin" / "llama-quantize",
-            llama_cpp_dir.parent / "build" / "llama-quantize",
-            llama_cpp_dir.parent / "llama-quantize",
-            Path("/Users/dave/llama.cpp/build/llama-quantize"),
-            Path("/Users/dave/llama.cpp/build/bin/llama-quantize")
+            base / rel
+            for base in search_bases
+            for rel in (Path("build") / "bin" / "llama-quantize", Path("build") / "llama-quantize", Path("llama-quantize"))
         ]
-        
+
         quantize_binary = None
         for path in quantize_paths:
             if path.exists():
