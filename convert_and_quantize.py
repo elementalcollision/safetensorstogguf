@@ -26,11 +26,22 @@ handler.setFormatter(formatter)
 logger.addHandler(handler)
 
 def setup_llama_cpp_path(llama_cpp_dir=None):
-    """Set up the llama.cpp path"""
-    # If not provided, try to auto-detect
+    """Locate the converter script and the llama-quantize binary.
+
+    The converter (safetensors_to_gguf.py) ships alongside this script, so it
+    is resolved relative to this file. Only the llama-quantize binary needs to
+    come from a llama.cpp checkout.
+    """
+    script_dir = Path(os.path.dirname(os.path.abspath(__file__)))
+
+    # The converter is a sibling of this script in the same repository.
+    convert_script = script_dir / "safetensors_to_gguf.py"
+    if not convert_script.exists():
+        raise ValueError(f"Converter script not found at {convert_script}")
+
+    # Locate the llama-quantize binary: explicit dir, then LLAMA_CPP_DIR, then
+    # directories relative to this script.
     if llama_cpp_dir is None:
-        # Try to find it relative to the script location
-        script_dir = Path(os.path.dirname(os.path.abspath(__file__)))
         possible_paths = []
         if os.environ.get("LLAMA_CPP_DIR"):
             possible_paths.append(Path(os.environ["LLAMA_CPP_DIR"]))
@@ -41,31 +52,21 @@ def setup_llama_cpp_path(llama_cpp_dir=None):
         ])
 
         for path in possible_paths:
-            # Check for the binary in the main directory
-            convert_binary = path / "convert-safetensors-to-gguf.py"
-            quantize_binary = path / "build" / "bin" / "llama-quantize"
-                
-            if convert_binary.exists() and quantize_binary.exists():
+            if (path / "build" / "bin" / "llama-quantize").exists():
                 llama_cpp_dir = path
                 logger.info(f"Found llama.cpp directory at: {llama_cpp_dir}")
                 break
-    
+
     if llama_cpp_dir is None:
         raise ValueError(
-            "Could not find llama.cpp directory with convert-safetensors-to-gguf.py script and llama-quantize binary. "
-            "Please specify it using --llama-cpp-dir."
+            "Could not find a llama.cpp checkout with the llama-quantize binary. "
+            "Specify it using --llama-cpp-dir or the LLAMA_CPP_DIR environment variable."
         )
-    
-    # Check if the convert script and quantize binary exist
-    convert_script = llama_cpp_dir / "convert-safetensors-to-gguf.py"
+
     quantize_binary = llama_cpp_dir / "build" / "bin" / "llama-quantize"
-    
-    if not convert_script.exists():
-        raise ValueError(f"convert-safetensors-to-gguf.py script not found at {convert_script}")
-    
     if not quantize_binary.exists():
         raise ValueError(f"llama-quantize binary not found at {quantize_binary}")
-    
+
     return llama_cpp_dir, convert_script, quantize_binary
 
 def parse_args():
@@ -105,14 +106,14 @@ def parse_args():
         "--moe-expert-quantization", type=str,
         choices=["f32", "f16", "q8_0", "q4_0", "q4_1", "q5_k", "q4_k", "same"],
         default="same",
-        help="Quantization type for MoE expert layers (default: same as main quantization)"
+        help="Quantization type for MoE expert layers (NOTE: not supported by upstream llama-quantize; currently ignored)"
     )
     
     parser.add_argument(
         "--moe-router-quantization", type=str,
         choices=["f32", "f16", "q8_0", "q4_0", "q4_1", "q5_k", "q4_k", "same"],
         default="same",
-        help="Quantization type for MoE router layers (default: same as main quantization)"
+        help="Quantization type for MoE router layers (NOTE: not supported by upstream llama-quantize; currently ignored)"
     )
     
     parser.add_argument(
@@ -167,7 +168,7 @@ def convert_safetensors_to_gguf(args, llama_cpp_dir, convert_script):
     Args:
         args: Command line arguments
         llama_cpp_dir: Path to llama.cpp directory
-        convert_script: Path to convert-safetensors-to-gguf.py script
+        convert_script: Path to the safetensors_to_gguf.py converter script
         
     Returns:
         Path to the generated uncompressed GGUF file
@@ -194,9 +195,9 @@ def convert_safetensors_to_gguf(args, llama_cpp_dir, convert_script):
     cmd = [
         sys.executable,
         str(convert_script),
+        "--model", str(args.safetensors_dir),
         "--outfile", str(intermediate_file),
         "--outtype", args.intermediate_type,
-        str(args.safetensors_dir)
     ]
     
     # Add verbose flag if specified
@@ -279,18 +280,16 @@ def quantize_gguf_model(args, intermediate_file, llama_cpp_dir, quantize_binary)
     if args.token_embedding_type:
         cmd.extend(["--token-embedding-type", args.token_embedding_type])
     
-    # Add MoE-specific options if specified
-    if args.moe_expert_quantization != "same":
-        # Note: These options are experimental and may not be supported by all llama.cpp versions
-        cmd.append("--moe-quantize")
-        cmd.extend(["--expert-quant", args.moe_expert_quantization])
-    
-    if args.moe_router_quantization != "same":
-        # Note: These options are experimental and may not be supported by all llama.cpp versions
-        if "--moe-quantize" not in cmd:
-            cmd.append("--moe-quantize")
-        cmd.extend(["--router-quant", args.moe_router_quantization])
-    
+    # Selective per-tensor quantization for experts/routers is not supported by
+    # upstream llama-quantize; warn rather than emitting flags that would fail.
+    if args.moe_expert_quantization != "same" or args.moe_router_quantization != "same":
+        logger.warning(
+            "--moe-expert-quantization/--moe-router-quantization are not supported by "
+            f"llama-quantize and will be ignored; all tensors use --type {args.type}. "
+            "Use --output-tensor-type / --token-embedding-type for the tensor-specific "
+            "control that llama-quantize does support."
+        )
+
     # Add input file, output file, and quantization type
     cmd.extend([str(intermediate_file), str(outfile), args.type])
     
