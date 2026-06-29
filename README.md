@@ -33,6 +33,13 @@ A toolkit for working with Hugging Face models and GGUF format for use with [lla
 
 > **Why `transformers`?** `safetensors_to_gguf.py` delegates the actual conversion to llama.cpp's `convert_hf_to_gguf.py`, which imports `transformers`, `safetensors`, and `sentencepiece`. If these are not installed you will see errors such as `No module named 'transformers'`, even though this repo's own scripts don't import them directly.
 
+### llama.cpp compatibility
+
+`safetensors_to_gguf.py` loads classes out of llama.cpp's `convert_hf_to_gguf.py`, so it tracks that file's (occasionally breaking) refactors:
+
+- **`Model` → `ModelBase`** — [ggml-org/llama.cpp#17114](https://github.com/ggml-org/llama.cpp/pull/17114) (merged 2026-05-15, commit `cc7200bf`) renamed the base class and a later change split the converter into a `conversion` package. On affected checkouts older code failed with `module 'convert_hf_to_gguf' has no attribute 'Model'`. This tool now accepts **either** `Model` or `ModelBase`, so current llama.cpp works out of the box.
+- **If you still hit an "Incompatible llama.cpp" error**, the converter API has changed again. The most reliable fallback is to check out a llama.cpp commit from **before #17114** (i.e. an ancestor of `cc7200bf`) and point to it with `--llama-cpp-dir`. Please also open an issue here with the llama.cpp commit hash so the loader can be updated.
+
 ## Project Structure and File Map
 
 This toolkit is organized as a set of standalone CLI utilities and supporting files. Below is a breakdown of each file, its purpose, and its dependencies:
