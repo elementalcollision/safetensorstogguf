@@ -80,11 +80,29 @@ def setup_llama_cpp_path(llama_cpp_dir=None):
         convert_module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(convert_module)
         
-        # Get the Model class and related functions
+        # Resolve the base model class. Recent llama.cpp renamed `Model` ->
+        # `ModelBase` (ggml-org/llama.cpp#17114, merged 2026-05-15) and a later
+        # change split the converter into a `conversion` package that
+        # convert_hf_to_gguf.py re-exports. Accept whichever name this checkout
+        # provides instead of dying with a cryptic
+        #   AttributeError: module 'convert_hf_to_gguf' has no attribute 'Model'
         global Model, LlamaModel, Llama4Model
-        Model = convert_module.Model
-        LlamaModel = convert_module.LlamaModel
-        
+        Model = getattr(convert_module, "Model", None) or getattr(
+            convert_module, "ModelBase", None
+        )
+        LlamaModel = getattr(convert_module, "LlamaModel", None)
+        if Model is None or LlamaModel is None:
+            missing = "Model/ModelBase" if Model is None else "LlamaModel"
+            raise ImportError(
+                f"Incompatible llama.cpp: convert_hf_to_gguf.py exposes no "
+                f"`{missing}` class. Recent llama.cpp refactored the converter "
+                f"(ggml-org/llama.cpp#17114 renamed `Model` -> `ModelBase`, and a "
+                f"later change split it into a `conversion` package). Use a "
+                f"llama.cpp checkout from before that refactor (see this repo's "
+                f"README, 'llama.cpp compatibility'), or point --llama-cpp-dir at a "
+                f"compatible checkout."
+            )
+
         # Now register the Llama4Model class
         @Model.register("Llama4ForConditionalGeneration")
         class Llama4ModelImpl(LlamaModel):
@@ -369,6 +387,10 @@ def setup_llama_cpp_path(llama_cpp_dir=None):
         Llama4Model = Llama4ModelImpl
         
         return LLAMA_CPP_PATH
+    except ImportError:
+        # Already a clear, actionable message (e.g. the version-compat error above)
+        # — propagate it verbatim rather than re-wrapping it.
+        raise
     except Exception as e:
         raise ImportError(f"Error importing convert_hf_to_gguf.py: {e}")
 
