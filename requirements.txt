@@ -19,3 +19,8 @@ sentencepiece
 # (required anyway, see README), its gguf module is imported from there. To
 # install it standalone instead, uncomment the line below:
 # gguf
+
+# Only needed to convert Mistral-native models (a params.json plus
+# consolidated*.safetensors, i.e. the --mistral-format path). llama.cpp's
+# converter raises ImportError without it. Uncomment if you convert those:
+# mistral-common
