@@ -197,9 +197,14 @@ python quantize_gguf.py --model /path/to/model.gguf --analyze-model --type auto
 
 ### MoE-Specific Quantization
 
+Experts dominate an MoE model's size, while the router is tiny and precision-sensitive — so it is usually worth quantizing them differently from each other:
+
 ```bash
-python quantize_gguf.py --model /path/to/model.gguf --type q4_k --moe-expert-quantization f16 --moe-router-quantization q8_0
+python quantize_gguf.py --model /path/to/model.gguf --type q4_k \
+  --moe-expert-quantization q4_k --moe-router-quantization f32
 ```
+
+These map onto llama.cpp's `--tensor-type NAME=TYPE`, targeting `ffn_gate_exps` / `ffn_up_exps` / `ffn_down_exps` for experts and `ffn_gate_inp` for the router. Both default to `same`, which leaves those tensors to `--type`.
 
 ### Basic Two-Step Conversion and Quantization for MoE Models
 
@@ -302,8 +307,8 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 ### MoE-Specific Options
 
 - `--analyze-model`: Analyze model structure before quantization to identify tensor distribution and MoE components
-- `--moe-expert-quantization`: Quantization type for MoE expert layers (f32, f16, q8_0, q4_0, q4_1, q5_k, q4_k, same)
-- `--moe-router-quantization`: Quantization type for MoE router layers (f32, f16, q8_0, q4_0, q4_1, q5_k, q4_k, same)
+- `--moe-expert-quantization`: Quantization type for MoE expert weights (`ffn_gate_exps` / `ffn_up_exps` / `ffn_down_exps`). Default `same` leaves them to `--type`
+- `--moe-router-quantization`: Quantization type for the MoE router (`ffn_gate_inp`). Routers are small and sensitive, so `f32` or `f16` is often worthwhile. Default `same`
 - `--verbose`: Enable verbose logging
 - `--llama-cpp-dir`: Path to the llama.cpp directory (default: auto-detect)
 
@@ -314,8 +319,8 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 - `--outdir`: Output directory for the final quantized GGUF model (if --outfile not specified)
 - `--type`: Quantization type for the final model (default: q4_k)
 - `--intermediate-type`: Format for the intermediate uncompressed GGUF file (f16, f32, default: f16)
-- `--moe-expert-quantization`: Quantization type for MoE expert layers
-- `--moe-router-quantization`: Quantization type for MoE router layers
+- `--moe-expert-quantization`: Quantization type for MoE expert weights (default `same`)
+- `--moe-router-quantization`: Quantization type for the MoE router (default `same`)
 - `--llama-cpp-dir`: Path to llama.cpp directory (if not automatically detected)
 - `--keep-intermediate`: Keep the intermediate uncompressed GGUF file
 - `--verbose`: Enable verbose output

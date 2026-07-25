@@ -13,7 +13,6 @@ import os
 import sys
 import subprocess
 import json
-import re
 from pathlib import Path
 from typing import List, Optional, Dict, Any, Tuple
 from collections import Counter, defaultdict
@@ -190,6 +189,92 @@ def parse_args():
     
     return parser.parse_args()
 
+def _add_gguf_to_path():
+    """Make llama.cpp's `gguf` module importable (same discovery as analyze_gguf.py).
+
+    Prefers an installed `gguf` package; otherwise falls back to a llama.cpp
+    checkout located via LLAMA_CPP_DIR or relative to this script.
+    """
+    try:
+        import gguf  # noqa: F401  - already importable
+        return
+    except ImportError:
+        pass
+
+    candidate_dirs = []
+    if os.environ.get("LLAMA_CPP_DIR"):
+        candidate_dirs.append(Path(os.environ["LLAMA_CPP_DIR"]))
+    script_dir = Path(os.path.dirname(os.path.abspath(__file__)))
+    candidate_dirs.extend([script_dir.parent.parent, script_dir.parent, script_dir])
+    for base in candidate_dirs:
+        gguf_py = base / "gguf-py"
+        if (gguf_py / "gguf").is_dir():
+            sys.path.insert(0, str(gguf_py))
+            return
+
+
+# GGUF tensor-name fragments for Mixture-of-Experts weights.
+#
+# llama-quantize compiles each --tensor-type name into a std::regex and applies
+# it with std::regex_search (llama.cpp src/llama-quant.cpp:686), i.e. an
+# unanchored match, so a bare fragment matches the full tensor name:
+# "ffn_gate_exps" matches "blk.1.ffn_gate_exps.weight". These fragments contain
+# no regex metacharacters, so they behave as literals.
+MOE_EXPERT_TENSORS = ("ffn_gate_exps", "ffn_up_exps", "ffn_down_exps")
+MOE_ROUTER_TENSORS = ("ffn_gate_inp",)
+
+
+def moe_tensor_type_args(expert_type: str, router_type: str) -> List[str]:
+    """Build --tensor-type arguments for MoE expert and router weights.
+
+    ``--moe-expert-quantization`` / ``--moe-router-quantization`` used to be
+    inert: upstream llama-quantize had no way to target individual tensors. It
+    now does, via ``--tensor-type NAME=TYPE`` (repeatable), so these map onto it
+    directly. ``same`` means "leave it to the global --type" and emits nothing.
+    """
+    args: List[str] = []
+    for tensor_type, names in ((expert_type, MOE_EXPERT_TENSORS),
+                               (router_type, MOE_ROUTER_TENSORS)):
+        if tensor_type and tensor_type != "same":
+            for name in names:
+                args.extend(["--tensor-type", f"{name}={tensor_type}"])
+    return args
+
+
+def read_gguf_tensors(input_file: Path) -> List[Dict[str, Any]]:
+    """Read tensor metadata straight out of a GGUF file.
+
+    Replaces an earlier approach that shelled out to ``llama-quantize --dry-run
+    --verbose`` and regex-scraped stdout. That could not work: ``--verbose`` is
+    not a llama-quantize option (it exits 1), and the dry-run output reports
+    aggregate per-type counts rather than the per-tensor lines the pattern
+    expected. Reading the file is also faster, portable, and needs no binary.
+    """
+    _add_gguf_to_path()
+    try:
+        from gguf import GGUFReader
+    except ImportError as e:
+        raise ImportError(
+            "Could not import the gguf module, which is needed to analyse a GGUF "
+            "file. Install it with `pip install gguf`, or set LLAMA_CPP_DIR to a "
+            "llama.cpp checkout that contains gguf-py."
+        ) from e
+
+    reader = GGUFReader(str(input_file))
+    tensors = []
+    for tensor in reader.tensors:
+        dims = [int(d) for d in tensor.shape]
+        while len(dims) < 4:
+            dims.append(1)
+        tensors.append({
+            "name": str(tensor.name),
+            "dimensions": dims[:4],
+            "type": str(tensor.tensor_type.name).lower(),
+            "size_mb": int(tensor.n_bytes) / (1024 * 1024),
+        })
+    return tensors
+
+
 def analyze_model_structure(input_file: Path, verbose: bool = False) -> Dict[str, Any]:
     """
     Analyze the structure of a GGUF model to understand tensor distribution and identify MoE components.
@@ -204,92 +289,14 @@ def analyze_model_structure(input_file: Path, verbose: bool = False) -> Dict[str
     logger = logging.getLogger("quantize-gguf")
     logger.info(f"Analyzing model structure: {input_file}")
     
-    # Run llama-gguf to extract model information
     try:
-        # Find llama-quantize binary for model analysis
-        script_dir = Path(os.path.dirname(os.path.abspath(__file__)))
-        search_bases = []
-        if os.environ.get("LLAMA_CPP_DIR"):
-            search_bases.append(Path(os.environ["LLAMA_CPP_DIR"]))
-        search_bases.extend([script_dir.parent.parent, script_dir.parent, script_dir])
-        quantize_paths = [
-            base / rel
-            for base in search_bases
-            for rel in (Path("build") / "bin" / "llama-quantize", Path("build") / "llama-quantize", Path("llama-quantize"))
-        ]
-
-        quantize_binary = None
-        for path in quantize_paths:
-            if path.exists():
-                quantize_binary = path
-                break
-        
-        if not quantize_binary:
-            logger.warning("llama-quantize binary not found. Cannot perform model analysis.")
-            return {"error": "llama-quantize binary not found"}
-        
-        # Run llama-quantize with --dry-run to get model information without quantizing
-        # This will output tensor information that we can parse
-        cmd = [str(quantize_binary), "--dry-run", "--verbose", str(input_file), "/dev/null", "q4_0"]
-        logger.info(f"Running command: {' '.join(cmd)}")
-        
-        result = subprocess.run(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True
-        )
-        
-        # Check for successful execution
-        if result.returncode != 0:
-            logger.warning(f"Error running llama-quantize: {result.stderr}")
-            return {"error": f"llama-quantize analysis failed: {result.stderr}"}
-        
-        # Parse the output to extract tensor information
-        tensor_info = []
-        
-        # Different pattern for llama-quantize output
-        # Look for lines like: tensor   42:         blk.0.attn_q.weight - [4096, 4096], type = f16, size =   32.00 MB
-        tensor_pattern = re.compile(r'tensor\s+\d+:\s+([\w\.]+)\s+-\s+\[(\d+(?:,\s*\d+)*)\],\s+type\s+=\s+(\w+),\s+size\s+=\s+(\d+\.\d+)\s+MB')
-        
-        # Also look for model size and quant size lines
-        model_size_pattern = re.compile(r'model size\s+=\s+(\d+\.\d+)\s+MB')
-        quant_size_pattern = re.compile(r'quant size\s+=\s+(\d+\.\d+)\s+MB')
-        
-        model_size_mb = None
+        tensor_info = read_gguf_tensors(input_file)
+        # llama-quantize reports these only when it runs; reading the file gives
+        # us the true source size instead, and the projected size is not known
+        # without invoking the quantizer.
+        model_size_mb = sum(t["size_mb"] for t in tensor_info)
         quant_size_mb = None
-        
-        for line in result.stdout.split('\n'):
-            # Check for tensor information
-            match = tensor_pattern.search(line)
-            if match:
-                name, dims_str, dtype, size_mb = match.groups()
-                # Parse dimensions
-                dims = [int(d.strip()) for d in dims_str.split(',')]
-                # Pad dimensions to length 4 if needed
-                while len(dims) < 4:
-                    dims.append(1)
-                
-                tensor_info.append({
-                    "name": name.strip(),
-                    "dimensions": dims[:4],  # Take first 4 dimensions
-                    "type": dtype.strip(),
-                    "size_mb": float(size_mb)
-                })
-                continue
-            
-            # Check for model size information
-            match = model_size_pattern.search(line)
-            if match:
-                model_size_mb = float(match.group(1))
-                continue
-                
-            # Check for quant size information
-            match = quant_size_pattern.search(line)
-            if match:
-                quant_size_mb = float(match.group(1))
-                continue
-        
+
         # Analyze tensor distribution
         total_size_mb = sum(t["size_mb"] for t in tensor_info)
         tensor_types = Counter(t["type"] for t in tensor_info)
@@ -318,40 +325,24 @@ def analyze_model_structure(input_file: Path, verbose: bool = False) -> Dict[str
         # Sort groups by size (descending)
         sorted_groups = sorted(group_sizes.items(), key=lambda x: x[1], reverse=True)
         
-        # Improved MoE detection
-        # Check for MoE components using multiple indicators
-        moe_keywords = ['expert', 'router', 'moe', 'gate', 'ffn_gate', 'ffn_up', 'ffn_down']
-        moe_tensors = []
+        # MoE detection keyed on the tensor names llama.cpp actually emits.
+        # An earlier version matched 'gate', 'ffn_up' and 'ffn_down', which appear
+        # in *every* dense feed-forward block, so every model looked like an MoE.
+        # Stacked expert weights end in `_exps`; the router is `ffn_gate_inp`.
         expert_tensors = []
         router_tensors = []
-        gate_tensors = []
-        
+
         for tensor in tensor_info:
             name = tensor["name"].lower()
-            
-            # Check if this tensor is part of an MoE architecture
-            if any(keyword in name for keyword in moe_keywords):
-                moe_tensors.append(tensor)
-                
-                # Categorize by tensor type
-                if 'expert' in name:
-                    expert_tensors.append(tensor)
-                elif 'router' in name or 'gate' in name:
-                    router_tensors.append(tensor)
-                    if 'gate' in name:
-                        gate_tensors.append(tensor)
-        
-        # Check for large third dimension in tensors (often indicates experts)
-        for tensor in tensor_info:
-            dims = tensor["dimensions"]
-            if len(dims) >= 3 and dims[2] > 1 and tensor["size_mb"] > 10.0:
-                # This might be an expert tensor with multiple experts in dim[2]
-                if tensor not in moe_tensors:
-                    moe_tensors.append(tensor)
-                    if tensor not in expert_tensors:
-                        expert_tensors.append(tensor)
-        
-        has_moe = len(moe_tensors) > 0
+            if any(fragment in name for fragment in MOE_EXPERT_TENSORS) or "_exps" in name:
+                expert_tensors.append(tensor)
+            elif any(fragment in name for fragment in MOE_ROUTER_TENSORS) or "exp_probs" in name:
+                router_tensors.append(tensor)
+
+        moe_tensors = expert_tensors + router_tensors
+        # Experts are the load-bearing signal: a router alone is not an MoE.
+        has_moe = len(expert_tensors) > 0
+        gate_tensors = router_tensors
         
         # Analyze tensor types to check for pre-quantized tensors
         quantized_types = [t for t in tensor_types.keys() if t.startswith('q') or t.startswith('iq')]
@@ -540,16 +531,12 @@ def quantize_gguf_model(args):
         has_moe = True
         logger.info(f"Forcing MoE detection based on model name: {args.model.name}")
 
-    # Selective per-tensor quantization for experts/routers is not supported by
-    # upstream llama-quantize. Honour the request with a clear warning instead of
-    # emitting flags that would make llama-quantize fail.
-    if args.moe_expert_quantization != "same" or args.moe_router_quantization != "same":
-        logger.warning(
-            "--moe-expert-quantization/--moe-router-quantization are not supported by "
-            f"llama-quantize and will be ignored; all tensors use --type {args.type}. "
-            "For the tensor-specific control llama-quantize does support, use "
-            "--output-tensor-type and --token-embedding-type."
-        )
+    # Selective per-tensor quantization is expressed with llama-quantize's
+    # --tensor-type NAME=TYPE, which may be repeated. Expert and router weights
+    # are matched by their GGUF tensor-name fragments.
+    cmd.extend(moe_tensor_type_args(
+        args.moe_expert_quantization, args.moe_router_quantization
+    ))
 
     # Add MoE-specific optimizations using supported parameters
     if has_moe:
