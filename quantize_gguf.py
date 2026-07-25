@@ -156,7 +156,27 @@ def parse_args():
         choices=["f32", "f16", "q8_0", "q4_0", "q4_1"],
         help="Use this type for the token embeddings tensor"
     )
-    
+
+    # Importance matrix
+    parser.add_argument(
+        "--imatrix", type=Path,
+        help="Importance matrix produced by llama-imatrix. Improves quality at a "
+             "given size, and is REQUIRED by the low-bit types: "
+             + ", ".join(sorted(IMATRIX_REQUIRED_TYPES))
+    )
+
+    parser.add_argument(
+        "--include-weights", action="append", metavar="TENSOR",
+        help="Use the importance matrix only for this tensor. Repeatable. "
+             "Requires --imatrix; mutually exclusive with --exclude-weights"
+    )
+
+    parser.add_argument(
+        "--exclude-weights", action="append", metavar="TENSOR",
+        help="Do not use the importance matrix for this tensor. Repeatable. "
+             "Requires --imatrix; mutually exclusive with --include-weights"
+    )
+
     # MoE-specific options
     parser.add_argument(
         "--analyze-model", action="store_true",
@@ -187,7 +207,48 @@ def parse_args():
         help="Path to the llama.cpp directory (default: auto-detect)"
     )
     
-    return parser.parse_args()
+    args = parser.parse_args()
+    validate_imatrix_args(parser.error, args)
+    return args
+
+
+def validate_imatrix_args(fail, args) -> None:
+    """Reject impossible importance-matrix combinations before doing any work.
+
+    `fail` is a callable that reports a usage error (argparse's parser.error).
+    """
+    imatrix = getattr(args, "imatrix", None)
+    include = getattr(args, "include_weights", None)
+    exclude = getattr(args, "exclude_weights", None)
+
+    if include and exclude:
+        fail("--include-weights and --exclude-weights cannot be used together")
+
+    if (include or exclude) and not imatrix:
+        fail("--include-weights/--exclude-weights require --imatrix")
+
+    if imatrix is not None and not Path(imatrix).is_file():
+        fail(f"importance matrix not found: {imatrix}")
+
+    quant_type = (getattr(args, "type", "") or "").lower()
+    if quant_type in IMATRIX_REQUIRED_TYPES and imatrix is None:
+        fail(
+            f"--type {quant_type} requires an importance matrix; pass --imatrix FILE. "
+            f"Generate one with llama.cpp's llama-imatrix, e.g. "
+            f"`llama-imatrix -m model.gguf -f calibration.txt -o imatrix.gguf`"
+        )
+
+
+def imatrix_args(args) -> List[str]:
+    """Build the llama-quantize importance-matrix arguments."""
+    if getattr(args, "imatrix", None) is None:
+        return []
+    result = ["--imatrix", str(args.imatrix)]
+    for tensor in getattr(args, "include_weights", None) or []:
+        result.extend(["--include-weights", tensor])
+    for tensor in getattr(args, "exclude_weights", None) or []:
+        result.extend(["--exclude-weights", tensor])
+    return result
 
 def _add_gguf_to_path():
     """Make llama.cpp's `gguf` module importable (same discovery as analyze_gguf.py).
@@ -211,6 +272,15 @@ def _add_gguf_to_path():
         if (gguf_py / "gguf").is_dir():
             sys.path.insert(0, str(gguf_py))
             return
+
+
+# Quantization types whose non-embedding tensors cannot be produced without an
+# importance matrix. llama.cpp raises "this quantization requires an imatrix!"
+# after loading the model; catching it here avoids that wasted work.
+# Source: tensor_requires_imatrix() in llama.cpp src/llama-quant.cpp.
+IMATRIX_REQUIRED_TYPES = frozenset({
+    "iq1_s", "iq1_m", "iq2_xxs", "iq2_xs", "iq2_s", "iq3_xxs", "q2_k_s",
+})
 
 
 # GGUF tensor-name fragments for Mixture-of-Experts weights.
@@ -556,6 +626,9 @@ def quantize_gguf_model(args):
         
     if args.token_embedding_type:
         cmd.extend(["--token-embedding-type", args.token_embedding_type])
+
+    # Importance matrix (and any per-tensor include/exclude scoping)
+    cmd.extend(imatrix_args(args))
     
     # Force MoE detection for models with Scout or MoE in their name
     model_name = args.model.name.lower()

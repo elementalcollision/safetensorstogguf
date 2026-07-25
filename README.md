@@ -195,6 +195,27 @@ python quantize_gguf.py --model /path/to/model.gguf --type q5_k --outfile /path/
 python quantize_gguf.py --model /path/to/model.gguf --analyze-model --type auto
 ```
 
+### Quantizing with an Importance Matrix
+
+An importance matrix (imatrix) tells the quantizer which weights matter most, improving quality at a given size. The low-bit `iq*` types cannot be produced without one — llama.cpp refuses them outright.
+
+```bash
+# 1. Generate the matrix from a calibration corpus (any representative text)
+llama-imatrix -m model.gguf -f calibration.txt -o model.imatrix
+
+# 2. Quantize using it
+python quantize_gguf.py --model model.gguf --type iq2_xxs --imatrix model.imatrix
+```
+
+Without `--imatrix`, that `--type` is rejected up front rather than failing after the model has been loaded. To scope the matrix to particular tensors:
+
+```bash
+python quantize_gguf.py --model model.gguf --type q4_k --imatrix model.imatrix \
+  --exclude-weights attn_q --exclude-weights attn_k
+```
+
+`convert_and_quantize.py` accepts the same three flags and forwards them to its quantization step.
+
 ### MoE-Specific Quantization
 
 Experts dominate an MoE model's size, while the router is tiny and precision-sensitive — so it is usually worth quantizing them differently from each other:
@@ -297,6 +318,8 @@ This project is licensed under the MIT License - see the LICENSE file for detail
   - IQ options: iq2_xxs, iq2_xs, iq3_xxs, iq3_xs, iq4_nl
   - Full precision: f16, bf16, f32
   - Special value: `auto` (use with `--analyze-model` for analysis-only mode)
+- `--imatrix`: Path to an importance matrix from `llama-imatrix`. Improves quality at a given size, and is **required** by the low-bit types `iq1_s`, `iq1_m`, `iq2_xxs`, `iq2_xs`, `iq2_s`, `iq3_xxs`, `q2_k_s`
+- `--include-weights` / `--exclude-weights`: Apply the importance matrix to only, or to all but, the named tensor. Repeatable; mutually exclusive; require `--imatrix`
 - `--threads`: Number of threads to use for quantization (default: number of CPU cores)
 - `--allow-requantize`: Allow requantizing tensors that have already been quantized
 - `--leave-output-tensor`: Leave output.weight unquantized (increases model size but may improve quality)

@@ -65,6 +65,14 @@ The GGUF file was created with an older converter that didn't add this metadata 
 
 The model may already be in a compressed format. Use `convert_and_quantize.py` to produce an uncompressed intermediate first, or check with `--analyze-model` for pre-quantized tensor types.
 
+### Importance matrix (imatrix)
+
+`--imatrix`, `--include-weights` and `--exclude-weights` are forwarded to `llama-quantize` by both `quantize_gguf.py` and `convert_and_quantize.py`.
+
+Seven quantization types cannot be produced without one — `iq1_s`, `iq1_m`, `iq2_xxs`, `iq2_xs`, `iq2_s`, `iq3_xxs` and `q2_k_s`. llama.cpp raises `this quantization requires an imatrix!` for them, but only after loading the model (`tensor_requires_imatrix()` in `src/llama-quant.cpp`); the wrappers reject the combination at argument-parse time instead. Note `token_embd` and `output.weight` are exempt upstream, and `iq4_nl`, `iq4_xs`, `iq3_s` and the k-quants work fine without one.
+
+Generate a matrix with `llama-imatrix -m model.gguf -f calibration.txt -o model.imatrix`. `llama-imatrix` needs a causal language model; it aborts on encoder models such as BERT.
+
 ### MoE quantization flags
 
 `--moe-expert-quantization` / `--moe-router-quantization` work in both `quantize_gguf.py` and `convert_and_quantize.py`. Both map onto `llama-quantize`'s repeatable `--tensor-type NAME=TYPE`, targeting `ffn_gate_exps` / `ffn_up_exps` / `ffn_down_exps` for experts and `ffn_gate_inp` for the router. `convert_and_quantize.py` imports the mapping from `quantize_gguf.py` so the two drivers cannot diverge. The default `same` emits nothing and leaves those tensors to `--type`.

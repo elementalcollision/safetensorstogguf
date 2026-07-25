@@ -231,5 +231,107 @@ class TestConvertAndQuantizeSharesMoeMapping(unittest.TestCase):
         self.assertNotIn("not supported by upstream llama-quantize", source)
 
 
+class TestImatrixArgs(unittest.TestCase):
+    """--imatrix and its per-tensor scoping map onto llama-quantize flags."""
+
+    class _Args:
+        def __init__(self, imatrix=None, include=None, exclude=None, type="q4_k"):
+            self.imatrix = imatrix
+            self.include_weights = include
+            self.exclude_weights = exclude
+            self.type = type
+
+    def test_no_imatrix_emits_nothing(self):
+        self.assertEqual(quantize_gguf.imatrix_args(self._Args()), [])
+
+    def test_imatrix_is_forwarded(self):
+        args = self._Args(imatrix="/tmp/m.imatrix")
+        self.assertEqual(quantize_gguf.imatrix_args(args),
+                         ["--imatrix", "/tmp/m.imatrix"])
+
+    def test_include_weights_is_repeatable(self):
+        args = self._Args(imatrix="/m", include=["attn_q", "ffn_up"])
+        self.assertEqual(quantize_gguf.imatrix_args(args),
+                         ["--imatrix", "/m",
+                          "--include-weights", "attn_q",
+                          "--include-weights", "ffn_up"])
+
+    def test_exclude_weights_is_repeatable(self):
+        args = self._Args(imatrix="/m", exclude=["attn_q", "attn_k"])
+        self.assertEqual(quantize_gguf.imatrix_args(args),
+                         ["--imatrix", "/m",
+                          "--exclude-weights", "attn_q",
+                          "--exclude-weights", "attn_k"])
+
+    def test_scoping_without_imatrix_emits_nothing(self):
+        # validate_imatrix_args rejects this combination up front; if it ever
+        # slipped through, do not emit dangling scope flags.
+        args = self._Args(include=["attn_q"])
+        self.assertEqual(quantize_gguf.imatrix_args(args), [])
+
+
+class TestImatrixValidation(unittest.TestCase):
+    """Impossible combinations are rejected before any work happens."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.imatrix = self.tmp / "m.imatrix"
+        self.imatrix.write_bytes(b"\x00")
+        self.errors = []
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _fail(self, message):
+        self.errors.append(message)
+
+    def _check(self, **kw):
+        args = TestImatrixArgs._Args(**kw)
+        quantize_gguf.validate_imatrix_args(self._fail, args)
+        return self.errors
+
+    def test_accepts_a_valid_combination(self):
+        self.assertEqual(self._check(imatrix=self.imatrix, include=["attn_q"]), [])
+
+    def test_rejects_include_with_exclude(self):
+        errs = self._check(imatrix=self.imatrix, include=["a"], exclude=["b"])
+        self.assertTrue(any("cannot be used together" in e for e in errs))
+
+    def test_rejects_scoping_without_imatrix(self):
+        errs = self._check(include=["attn_q"])
+        self.assertTrue(any("require --imatrix" in e for e in errs))
+
+    def test_rejects_missing_imatrix_file(self):
+        errs = self._check(imatrix=self.tmp / "nope.imatrix")
+        self.assertTrue(any("not found" in e for e in errs))
+
+    def test_rejects_low_bit_type_without_imatrix(self):
+        # llama.cpp raises "this quantization requires an imatrix!" only after
+        # loading the model; fail before that work is done.
+        for quant in sorted(quantize_gguf.IMATRIX_REQUIRED_TYPES):
+            self.errors = []
+            errs = self._check(type=quant)
+            self.assertTrue(any("requires an importance matrix" in e for e in errs),
+                            f"{quant} should require an imatrix")
+
+    def test_low_bit_type_with_imatrix_is_accepted(self):
+        self.assertEqual(self._check(imatrix=self.imatrix, type="iq2_xxs"), [])
+
+    def test_ordinary_types_need_no_imatrix(self):
+        for quant in ("q4_k", "q8_0", "iq4_nl", "iq4_xs", "iq3_s", "q2_k"):
+            self.errors = []
+            self.assertEqual(self._check(type=quant), [], f"{quant} must not require one")
+
+
+class TestConvertAndQuantizeSharesImatrix(unittest.TestCase):
+    """Both drivers use one implementation, not two copies."""
+
+    def test_imports_the_shared_helpers(self):
+        import convert_and_quantize
+        self.assertIs(convert_and_quantize.imatrix_args, quantize_gguf.imatrix_args)
+        self.assertIs(convert_and_quantize.validate_imatrix_args,
+                      quantize_gguf.validate_imatrix_args)
+
+
 if __name__ == "__main__":
     unittest.main()

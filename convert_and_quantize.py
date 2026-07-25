@@ -21,7 +21,7 @@ from typing import List, Optional, Dict, Any, Tuple
 # The quantizer ships alongside this script; reuse its MoE tensor-name mapping so
 # the two drivers cannot drift apart.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from quantize_gguf import moe_tensor_type_args
+from quantize_gguf import imatrix_args, moe_tensor_type_args, validate_imatrix_args
 
 # Configure logging
 logger = logging.getLogger("convert-and-quantize")
@@ -110,6 +110,24 @@ def parse_args():
     )
     
     parser.add_argument(
+        "--imatrix", type=Path,
+        help="Importance matrix produced by llama-imatrix, forwarded to the "
+             "quantization step. Improves quality at a given size"
+    )
+
+    parser.add_argument(
+        "--include-weights", action="append", metavar="TENSOR",
+        help="Use the importance matrix only for this tensor. Repeatable. "
+             "Requires --imatrix; mutually exclusive with --exclude-weights"
+    )
+
+    parser.add_argument(
+        "--exclude-weights", action="append", metavar="TENSOR",
+        help="Do not use the importance matrix for this tensor. Repeatable. "
+             "Requires --imatrix; mutually exclusive with --include-weights"
+    )
+
+    parser.add_argument(
         "--moe-expert-quantization", type=str,
         choices=["f32", "f16", "q8_0", "q4_0", "q4_1", "q5_k", "q4_k", "same"],
         default="same",
@@ -166,7 +184,9 @@ def parse_args():
         help="Token embedding tensor type (default: unchanged)"
     )
     
-    return parser.parse_args()
+    args = parser.parse_args()
+    validate_imatrix_args(parser.error, args)
+    return args
 
 def convert_safetensors_to_gguf(args, llama_cpp_dir, convert_script):
     """
@@ -287,6 +307,9 @@ def quantize_gguf_model(args, intermediate_file, llama_cpp_dir, quantize_binary)
     if args.token_embedding_type:
         cmd.extend(["--token-embedding-type", args.token_embedding_type])
     
+    # Importance matrix (and any per-tensor include/exclude scoping)
+    cmd.extend(imatrix_args(args))
+
     # Per-tensor expert/router targeting, expressed with llama-quantize's
     # repeatable --tensor-type NAME=TYPE. Shared with quantize_gguf.py.
     cmd.extend(moe_tensor_type_args(
