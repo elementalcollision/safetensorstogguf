@@ -92,7 +92,9 @@ def parse_args():
     
     parser.add_argument(
         "--type", type=str, default="q4_k",
-        choices=["q4_0", "q4_1", "q5_0", "q5_1", "q8_0", "q8_1", "q2_k", "q3_k", "q4_k", "q5_k", "q6_k", "q8_k", "f16", "f32"],
+        # q8_1 and q8_k were offered here but llama-quantize rejects both with
+        # "invalid ftype" - they are ggml block types, not model file types.
+        choices=["q4_0", "q4_1", "q5_0", "q5_1", "q8_0", "q2_k", "q3_k", "q4_k", "q5_k", "q6_k", "f16", "f32"],
         help="Quantization type for the final model"
     )
     
