@@ -8,6 +8,9 @@ to GGUF format for use with llama.cpp inference.
 """
 
 import argparse
+import importlib
+import importlib.util
+import inspect
 import json
 import logging
 import os
@@ -18,17 +21,170 @@ from typing import List, Optional, Dict, Any
 
 # Global variables that will be set in setup_llama_cpp_path
 LLAMA_CPP_PATH = None
-Model = None
-LlamaModel = None
-Llama4Model = None
+Model = None        # ModelBase (or, on very old checkouts, Model)
+UPSTREAM = None     # UpstreamConverter describing what this llama.cpp provides
 
 # Logging is configured via logging.basicConfig() in main(); fetch the named
 # logger here without attaching a second handler (which would double every line).
 logger = logging.getLogger("safetensors-to-gguf")
 
+
+class UpstreamConverter:
+    """A version-agnostic view of llama.cpp's conversion machinery.
+
+    llama.cpp's converter has changed shape several times, and pinning any one
+    of those shapes is what has repeatedly broken this tool:
+
+    * ``<= 0f5ccd6f`` (2025-08-01) — ``load_hparams(dir_model)``.
+    * ``a3a7874``  (2025-08-11, llama.cpp#14737) — ``load_hparams`` gained a
+      second *required* argument, ``is_mistral_format``.
+    * ``cc7200bf``  (2026-05-15, llama.cpp#17114) — the monolithic
+      ``convert_hf_to_gguf.py`` was split into a ``conversion`` package. It now
+      re-exports only a handful of helpers and **no model classes**, and the
+      class registry is populated *lazily* by ``get_model_class``.
+
+    Rather than requiring a particular layout, we probe for whichever
+    capabilities the checkout in use actually provides and adapt.
+    """
+
+    def __init__(self, model_base, module=None, package=None):
+        self.model_base = model_base
+        self.module = module      # legacy monolithic convert_hf_to_gguf module
+        self.package = package    # `conversion` package (llama.cpp#17114+)
+
+    # -- capability probing -------------------------------------------------
+
+    def _lookup(self, name):
+        """Find a helper by name, preferring the `conversion` package."""
+        for source in (self.package, self.module):
+            if source is not None:
+                obj = getattr(source, name, None)
+                if obj is not None:
+                    return obj
+        return None
+
+    def _import_submodule(self, name):
+        """Import `conversion.<name>` (new layout) or fall back to the monolith."""
+        if self.package is not None:
+            return importlib.import_module(f"{self.package.__name__}.{name}")
+        return self.module
+
+    @property
+    def layout(self):
+        return "conversion-package" if self.package is not None else "monolithic"
+
+    @property
+    def has_lazy_registry(self):
+        """True when upstream exposes get_model_class(), which imports on demand."""
+        return self._lookup("get_model_class") is not None
+
+    # -- adapted operations -------------------------------------------------
+
+    def load_hparams(self, dir_model, is_mistral_format=False):
+        """Call ModelBase.load_hparams across both signature generations."""
+        load = self.model_base.load_hparams
+        try:
+            accepts_mistral = "is_mistral_format" in inspect.signature(load).parameters
+        except (TypeError, ValueError):  # pragma: no cover - builtins/C functions
+            accepts_mistral = False
+
+        if accepts_mistral:
+            return load(dir_model, is_mistral_format)
+
+        if is_mistral_format:
+            raise ValueError(
+                "This llama.cpp checkout predates Mistral-format support "
+                "(added by llama.cpp#14737, 2025-08-11). Update llama.cpp or "
+                "drop --mistral-format."
+            )
+        return load(dir_model)
+
+    def model_architecture(self, hparams, mmproj=False):
+        """Resolve the architecture string using upstream's own resolver.
+
+        Upstream's ``get_model_architecture`` understands nested layouts that a
+        bare ``hparams["architectures"][0]`` misses — ``text_config``, InternVL's
+        ``llm_config``, Qwen2.5-Omni's ``thinker_config``, DeepSeek-OCR's
+        ``language_config`` and non-HF Mamba's ``ssm_cfg``.
+        """
+        resolver = self._lookup("get_model_architecture")
+        if resolver is not None:
+            model_type = self._model_type(mmproj)
+            if model_type is not None:
+                try:
+                    return resolver(hparams, model_type)
+                except TypeError:
+                    pass
+            return resolver(hparams)
+
+        # Very old checkouts predate get_model_architecture.
+        architectures = hparams.get("architectures")
+        if not architectures:
+            raise ValueError(
+                "Could not determine the model architecture: no 'architectures' "
+                "key in the model config."
+            )
+        return architectures[0]
+
+    def _model_type(self, mmproj=False):
+        model_type = self._lookup("ModelType")
+        if model_type is None:
+            return None
+        return model_type.MMPROJ if mmproj else model_type.TEXT
+
+    def model_class(self, architecture, mmproj=False):
+        """Resolve architecture -> model class, importing lazily when required.
+
+        Post-llama.cpp#17114 ``ModelBase._model_classes`` starts *empty*: classes
+        register themselves only when their ``conversion.<family>`` module is
+        imported. ``from_model_architecture`` is a plain registry read and so
+        resolves nothing, which is why this tool previously reported almost every
+        model as unsupported. ``get_model_class`` performs that import first.
+        """
+        get_model_class = self._lookup("get_model_class")
+        if get_model_class is not None:
+            return get_model_class(architecture, mmproj=mmproj)
+
+        # Legacy monolith: importing the module registered every class eagerly.
+        model_type = self._model_type(mmproj)
+        if model_type is not None:
+            try:
+                return self.model_base.from_model_architecture(architecture, model_type)
+            except TypeError:
+                pass
+        return self.model_base.from_model_architecture(architecture)
+
+    def mistral_model_class(self, hparams, mmproj=False):
+        """Select the Mistral-native class the way upstream's CLI does."""
+        if mmproj:
+            if hparams.get("vision_encoder") is None:
+                raise ValueError("This model does not support multimodal conversion")
+            return getattr(self._import_submodule("pixtral"), "PixtralModel")
+
+        mistral = self._import_submodule("mistral")
+        name = "MistralMoeModel" if hparams.get("moe") is not None else "MistralModel"
+        model_class = getattr(mistral, name, None)
+        if model_class is None:
+            raise ValueError(
+                f"This llama.cpp checkout does not provide {name}; "
+                "update llama.cpp to convert Mistral-format models."
+            )
+        return model_class
+
+    def require_mistral_common(self):
+        """Mistral-format conversion needs the `mistral-common` package."""
+        installed = self._lookup("_mistral_common_installed")
+        if installed is False:
+            message = self._lookup("_mistral_import_error_msg") or (
+                "Mistral format requires the `mistral-common` package: "
+                "pip install mistral-common"
+            )
+            raise ImportError(message)
+
+
 def setup_llama_cpp_path(llama_cpp_dir=None):
     """Set up the llama.cpp path and import necessary modules"""
-    global LLAMA_CPP_PATH, Model, LlamaModel, Llama4Model
+    global LLAMA_CPP_PATH, Model, UPSTREAM
     
     # If not provided, try to auto-detect
     if llama_cpp_dir is None:
@@ -66,333 +222,62 @@ def setup_llama_cpp_path(llama_cpp_dir=None):
         raise ImportError("Could not import gguf module. Make sure llama.cpp is properly installed.")
     
     try:
-        # Use importlib to import the module without executing its main function
-        import importlib.util
-        convert_script_path = LLAMA_CPP_PATH / "convert_hf_to_gguf.py"
-        
-        if not convert_script_path.exists():
-            raise FileNotFoundError(f"Could not find {convert_script_path}")
-            
-        spec = importlib.util.spec_from_file_location(
-            "convert_hf_to_gguf", 
-            str(convert_script_path)
-        )
-        convert_module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(convert_module)
-        
-        # Resolve the base model class. Recent llama.cpp renamed `Model` ->
-        # `ModelBase` (ggml-org/llama.cpp#17114, merged 2026-05-15) and a later
-        # change split the converter into a `conversion` package that
-        # convert_hf_to_gguf.py re-exports. Accept whichever name this checkout
-        # provides instead of dying with a cryptic
-        #   AttributeError: module 'convert_hf_to_gguf' has no attribute 'Model'
-        global Model, LlamaModel, Llama4Model
-        Model = getattr(convert_module, "Model", None) or getattr(
-            convert_module, "ModelBase", None
-        )
-        LlamaModel = getattr(convert_module, "LlamaModel", None)
-        if Model is None or LlamaModel is None:
-            missing = "Model/ModelBase" if Model is None else "LlamaModel"
+        convert_module = None
+        package = None
+
+        # Post-llama.cpp#17114 the converter lives in a `conversion` package.
+        # Prefer it: it owns the lazy model registry and the architecture
+        # resolver, so we never have to guess at class names.
+        try:
+            package = importlib.import_module("conversion")
+        except ImportError:
+            package = None
+        else:
+            # `conversion` is a generic name; make sure we imported llama.cpp's.
+            package_file = getattr(package, "__file__", None) or ""
+            if not str(Path(package_file).resolve()).startswith(str(LLAMA_CPP_PATH.resolve())):
+                logger.debug("Ignoring unrelated `conversion` package at %s", package_file)
+                package = None
+
+        if package is None:
+            # Legacy monolithic convert_hf_to_gguf.py. Import it by file path so
+            # its __main__ block does not run.
+            convert_script_path = LLAMA_CPP_PATH / "convert_hf_to_gguf.py"
+            if not convert_script_path.exists():
+                raise FileNotFoundError(f"Could not find {convert_script_path}")
+
+            spec = importlib.util.spec_from_file_location(
+                "convert_hf_to_gguf",
+                str(convert_script_path)
+            )
+            convert_module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(convert_module)
+
+        # Resolve the base class. It has been `ModelBase` since ~2025-04-30;
+        # `Model` is only present on checkouts older than that.
+        global Model, UPSTREAM
+        source = package if package is not None else convert_module
+        Model = getattr(source, "ModelBase", None) or getattr(source, "Model", None)
+        if Model is None:
             raise ImportError(
-                f"Incompatible llama.cpp: convert_hf_to_gguf.py exposes no "
-                f"`{missing}` class. Recent llama.cpp refactored the converter "
-                f"(ggml-org/llama.cpp#17114 renamed `Model` -> `ModelBase`, and a "
-                f"later change split it into a `conversion` package). Use a "
-                f"llama.cpp checkout from before that refactor (see this repo's "
-                f"README, 'llama.cpp compatibility'), or point --llama-cpp-dir at a "
-                f"compatible checkout."
+                "Incompatible llama.cpp: could not find a `ModelBase` (or legacy "
+                "`Model`) class in convert_hf_to_gguf.py or the `conversion` "
+                "package. Point --llama-cpp-dir at a llama.cpp checkout, or open "
+                "an issue with the llama.cpp commit hash."
             )
 
-        # Now register the Llama4Model class
-        @Model.register("Llama4ForConditionalGeneration")
-        class Llama4ModelImpl(LlamaModel):
-            """Llama4 model implementation"""
-            # Use the same model architecture as LlamaModel
-            model_arch = LlamaModel.model_arch
-            
-            def find_hparam(self, keys, optional=False):
-                """Override to handle nested configuration in Llama4 models"""
-                # First try the standard approach
-                try:
-                    return super().find_hparam(keys, optional=True)
-                except ValueError:
-                    # If not found, try looking in text_config
-                    if "text_config" in self.hparams:
-                        for key in keys:
-                            if key in self.hparams["text_config"]:
-                                return self.hparams["text_config"][key]
-                    
-                    # If still not found and not optional, raise error
-                    if not optional:
-                        raise ValueError(f"could not find any of: {keys}")
-                    return None
-            
-            def modify_tensors(self, data_torch, name, bid=None):
-                """Override to handle Llama4 model tensors"""
-                logger = logging.getLogger("safetensors-to-gguf")
-                
-                # Skip multimodal tensors
-                if "multi_modal_projector" in name or "vision_model" in name:
-                    logger.debug(f"Skipping multimodal tensor: {name}")
-                    return []
-                
-                # Skip MoE-specific tensors (router weights and expert layers)
-                if "feed_forward.router" in name or "feed_forward.experts" in name:
-                    logger.debug(f"Skipping MoE tensor: {name}")
-                    return []
-                
-                # For all other tensors, use the standard handling
-                return super().modify_tensors(data_torch, name, bid)
-            
-            def set_gguf_parameters(self):
-                """Override to handle Llama-4 specific parameters"""
-                logger = logging.getLogger("safetensors-to-gguf")
-                
-                # Make sure vocab_size is set correctly
-                if "vocab_size" not in self.hparams and "text_config" in self.hparams and "vocab_size" in self.hparams["text_config"]:
-                    self.hparams["vocab_size"] = self.hparams["text_config"]["vocab_size"]
-                
-                # Call the parent method to set standard parameters
-                super().set_gguf_parameters()
-                
-                # Add context length parameter
-                context_length = None
-                
-                # Try to get context length from max_position_embeddings in text_config
-                if "text_config" in self.hparams and "max_position_embeddings" in self.hparams["text_config"]:
-                    context_length = self.hparams["text_config"]["max_position_embeddings"]
-                    logger.info(f"Using max_position_embeddings from text_config as context_length: {context_length}")
-                # Fallback to max_position_embeddings in root config
-                elif "max_position_embeddings" in self.hparams:
-                    context_length = self.hparams["max_position_embeddings"]
-                    logger.info(f"Using max_position_embeddings as context_length: {context_length}")
-                # Fallback to a default value for Llama-4
-                else:
-                    context_length = 8192  # Default context length for Llama-4
-                    logger.warning(f"Could not find context length in model config, using default: {context_length}")
-                
-                # Add the context length parameter to the GGUF file
-                self.gguf_writer.add_uint32("llama.context_length", context_length)
-                logger.info(f"Added context_length parameter: {context_length}")
-                
-                # Add the layer_norm_rms_epsilon parameter required by newer llama.cpp versions
-                rms_norm_eps = 1e-5  # Default value for Llama-4
-                
-                # Try to get rms_norm_eps from text_config
-                if "text_config" in self.hparams and "rms_norm_eps" in self.hparams["text_config"]:
-                    rms_norm_eps = self.hparams["text_config"]["rms_norm_eps"]
-                    logger.info(f"Using rms_norm_eps from text_config: {rms_norm_eps}")
-                # Fallback to rms_norm_eps in root config
-                elif "rms_norm_eps" in self.hparams:
-                    rms_norm_eps = self.hparams["rms_norm_eps"]
-                    logger.info(f"Using rms_norm_eps from root config: {rms_norm_eps}")
-                else:
-                    logger.warning(f"Could not find rms_norm_eps in model config, using default: {rms_norm_eps}")
-                
-                # Add the layer_norm_rms_epsilon parameter to the GGUF file
-                self.gguf_writer.add_float32("llama.attention.layer_norm_rms_epsilon", rms_norm_eps)
-                logger.info(f"Added layer_norm_rms_epsilon parameter: {rms_norm_eps}")
-            
-            def set_vocab(self):
-                """Override to handle Llama-4 tokenizer"""
-                logger = logging.getLogger("safetensors-to-gguf")
-                logger.info("Using Llama-4 custom tokenizer handling")
-                
-                # Check if tokenizer.json exists instead of tokenizer.model
-                tokenizer_json_path = os.path.join(self.dir_model, "tokenizer.json")
-                if os.path.exists(tokenizer_json_path):
-                    logger.info(f"Found tokenizer.json at {tokenizer_json_path}")
-                    self._set_vocab_from_tokenizer_json(tokenizer_json_path)
-                else:
-                    # Fall back to standard method
-                    logger.warning("No tokenizer.json found, falling back to standard method")
-                    super().set_vocab()
-            
-            def _set_vocab_from_tokenizer_json(self, tokenizer_path):
-                """Set vocabulary from tokenizer.json file"""
-                logger = logging.getLogger("safetensors-to-gguf")
-                logger.info(f"Loading vocabulary from {tokenizer_path}")
-                
-                import json
-                with open(tokenizer_path, 'r', encoding='utf-8') as f:
-                    tokenizer_data = json.load(f)
-                
-                # Extract vocabulary from tokenizer.json
-                if 'model' in tokenizer_data and 'vocab' in tokenizer_data['model']:
-                    vocab = tokenizer_data['model']['vocab']
-                    logger.info(f"Loaded vocabulary with {len(vocab)} tokens")
-                    
-                    # Create token list
-                    tokens = []
-                    scores = []
-                    toktypes = []
-                    
-                    # Process each token
-                    for token, token_id in vocab.items():
-                        # Convert token to bytes
-                        token_bytes = token.encode('utf-8')
-                        tokens.append(token_bytes)
-                        
-                        # Use default score
-                        scores.append(0.0)
-                        
-                        # Use default token type (normal)
-                        toktypes.append(0)
-                    
-                    # Add tokens to GGUF
-                    self.gguf_writer.add_tokenizer_model("llama")
-                    self.gguf_writer.add_token_list(tokens)
-                    self.gguf_writer.add_token_scores(scores)
-                    
-                    # Add token types if supported
-                    if hasattr(self.gguf_writer, 'add_token_types'):
-                        self.gguf_writer.add_token_types(toktypes)
-                    
-                    # Handle special tokens
-                    # Get special token IDs from config
-                    special_tokens = {}
-                    
-                    # Check text_config for special token IDs
-                    if 'text_config' in self.hparams:
-                        if 'bos_token_id' in self.hparams['text_config']:
-                            special_tokens['bos_token_id'] = self.hparams['text_config']['bos_token_id']
-                        
-                        if 'eos_token_id' in self.hparams['text_config']:
-                            eos_tokens = self.hparams['text_config']['eos_token_id']
-                            # Handle both single value and list
-                            if isinstance(eos_tokens, list):
-                                special_tokens['eos_token_id'] = eos_tokens[0]  # Use first one
-                            else:
-                                special_tokens['eos_token_id'] = eos_tokens
-                    
-                    # Add special tokens to GGUF
-                    if 'bos_token_id' in special_tokens:
-                        logger.info(f"Setting BOS token ID: {special_tokens['bos_token_id']}")
-                        self.gguf_writer.add_bos_token_id(special_tokens['bos_token_id'])
-                    
-                    if 'eos_token_id' in special_tokens:
-                        logger.info(f"Setting EOS token ID: {special_tokens['eos_token_id']}")
-                        self.gguf_writer.add_eos_token_id(special_tokens['eos_token_id'])
-                else:
-                    raise ValueError("Could not find vocabulary in tokenizer.json")
-            
-            def map_tensor_name(self, name, try_suffixes=(".weight", ".bias")):
-                """Override to handle Llama-4 tensor naming structure"""
-                # First try the standard mapping
-                try:
-                    return super().map_tensor_name(name, try_suffixes)
-                except ValueError:
-                    # Handle Llama-4 specific tensor naming
-                    logger = logging.getLogger("safetensors-to-gguf")
-                    logger.debug(f"Attempting to map Llama-4 tensor: {name}")
-                    
-                    # Skip multimodal tensors
-                    if "vision_model" in name or "vision_tower" in name or "multi_modal" in name:
-                        logger.debug(f"Skipping multimodal tensor: {name}")
-                        return None
-                    
-                    # Skip MoE tensors
-                    if "experts" in name or "router" in name:
-                        logger.debug(f"Skipping MoE tensor: {name}")
-                        return None
-                    
-                    # Handle shared expert tensors
-                    if "feed_forward.shared_expert" in name:
-                        # Extract layer number using regex
-                        import re
-                        # Try Llama-4 Scout specific pattern first
-                        layer_match = re.search(r"language_model\.model\.layers\.([0-9]+)\.feed_forward", name)
-                        if not layer_match:
-                            # Try original Llama-4 pattern
-                            layer_match = re.search(r"layers\.([0-9]+)\.feed_forward", name)
-                        
-                        if layer_match:
-                            layer_num = int(layer_match.group(1))
-                            # Map feed-forward layers with layer number
-                            if "gate_proj" in name:
-                                return f"blk.{layer_num}.ffn_gate"
-                            elif "up_proj" in name:
-                                return f"blk.{layer_num}.ffn_up"
-                            elif "down_proj" in name:
-                                return f"blk.{layer_num}.ffn_down"
-                    
-                    # Handle other Llama-4 specific tensor names
-                    if "language_model.model.embed_tokens" in name:
-                        return "token_embd"
-                    elif "language_model.model.norm" in name:
-                        return "output_norm"
-                    elif "language_model.lm_head" in name:
-                        return "output"
-                    
-                    # Handle Llama-4 Scout specific tensor naming pattern
-                    import re
-                    if "language_model.model.layers" in name:
-                        # Extract layer number using regex
-                        layer_match = re.search(r"language_model\.model\.layers\.([0-9]+)", name)
-                        if layer_match:
-                            layer_num = int(layer_match.group(1))
-                            
-                            # Map attention and norm layers
-                            if "self_attn.q_proj.weight" in name:
-                                return f"blk.{layer_num}.attn_q"
-                            elif "self_attn.k_proj.weight" in name:
-                                return f"blk.{layer_num}.attn_k"
-                            elif "self_attn.v_proj.weight" in name:
-                                return f"blk.{layer_num}.attn_v"
-                            elif "self_attn.o_proj.weight" in name:
-                                return f"blk.{layer_num}.attn_output"
-                            elif "input_layernorm.weight" in name:
-                                return f"blk.{layer_num}.attn_norm"
-                            elif "post_attention_layernorm.weight" in name:
-                                return f"blk.{layer_num}.ffn_norm"
-                            
-                            # Map MLP layers
-                            elif "mlp.gate_proj.weight" in name:
-                                return f"blk.{layer_num}.ffn_gate"
-                            elif "mlp.up_proj.weight" in name:
-                                return f"blk.{layer_num}.ffn_up"
-                            elif "mlp.down_proj.weight" in name:
-                                return f"blk.{layer_num}.ffn_down"
-                    
-                    # Handle original Llama-4 tensor naming pattern
-                    for layer_type in ["input_layernorm", "post_attention_layernorm", "self_attn.q_proj", 
-                                    "self_attn.k_proj", "self_attn.v_proj", "self_attn.o_proj"]:
-                        if layer_type in name:
-                            # Extract the layer number
-                            parts = name.split(".")
-                            for part in parts:
-                                if part.startswith("layers"):
-                                    layer_parts = part.split("layers.")
-                                    if len(layer_parts) > 1 and layer_parts[1].isdigit():
-                                        layer_num = int(layer_parts[1])
-                                        # Map to standard llama.cpp tensor names
-                                        if "input_layernorm" in layer_type:
-                                            return f"blk.{layer_num}.attn_norm"
-                                        elif "post_attention_layernorm" in layer_type:
-                                            return f"blk.{layer_num}.ffn_norm"
-                                        elif "self_attn.q_proj" in layer_type:
-                                            return f"blk.{layer_num}.attn_q"
-                                        elif "self_attn.k_proj" in layer_type:
-                                            return f"blk.{layer_num}.attn_k"
-                                        elif "self_attn.v_proj" in layer_type:
-                                            return f"blk.{layer_num}.attn_v"
-                                        elif "self_attn.o_proj" in layer_type:
-                                            return f"blk.{layer_num}.attn_output"
-                    
-                    # If we get here, we couldn't map the tensor name
-                    logger.warning(f"Could not map tensor: {name}")
-                    raise ValueError(f"Can not map tensor {name!r}")
-        
-        # Replace the global Llama4Model with the implementation
-        Llama4Model = Llama4ModelImpl
-        
+        UPSTREAM = UpstreamConverter(Model, module=convert_module, package=package)
+        logger.debug(
+            "llama.cpp converter layout: %s (lazy registry: %s)",
+            UPSTREAM.layout, UPSTREAM.has_lazy_registry,
+        )
+
         return LLAMA_CPP_PATH
     except ImportError:
-        # Already a clear, actionable message (e.g. the version-compat error above)
-        # — propagate it verbatim rather than re-wrapping it.
+        # Already a clear, actionable message — propagate it verbatim.
         raise
     except Exception as e:
-        raise ImportError(f"Error importing convert_hf_to_gguf.py: {e}")
+        raise ImportError(f"Error importing llama.cpp conversion modules: {e}")
 
 def parse_args():
     """Parse command line arguments."""
@@ -475,8 +360,41 @@ def parse_args():
         "--llama-cpp-dir", type=Path,
         help="Path to the llama.cpp directory (default: auto-detect)"
     )
-    
+
+    parser.add_argument(
+        "--mistral-format", action="store_true", default=None,
+        help="Treat the model as Mistral-native (params.json + consolidated*.safetensors) "
+             "rather than HuggingFace format. Auto-detected when the directory has a "
+             "params.json and no config.json. Requires the `mistral-common` package."
+    )
+
+    parser.add_argument(
+        "--no-mistral-format", dest="mistral_format", action="store_false",
+        help="Disable Mistral-format auto-detection and force HuggingFace format."
+    )
+
     return parser.parse_args()
+
+
+def resolve_mistral_format(args) -> bool:
+    """Decide whether to read the model as Mistral-native.
+
+    Explicit --mistral-format / --no-mistral-format always win. Otherwise a
+    directory carrying params.json but no config.json is Mistral-native: that is
+    the layout llama.cpp's own `--mistral-format` expects.
+    """
+    if args.mistral_format is not None:
+        return args.mistral_format
+
+    has_params = (args.model / "params.json").is_file()
+    has_config = (args.model / "config.json").is_file()
+    detected = has_params and not has_config
+    if detected:
+        logger.info(
+            "Detected Mistral-native layout (params.json, no config.json); "
+            "converting with --mistral-format. Pass --no-mistral-format to override."
+        )
+    return detected
 
 def verify_safetensors_model(model_dir: Path) -> bool:
     """
@@ -545,44 +463,41 @@ def convert_safetensors_to_gguf(args):
     }
     output_type = ftype_map[args.outtype]
     
+    # Mistral-native models ship params.json instead of an HF config.json.
+    is_mistral_format = resolve_mistral_format(args)
+    if is_mistral_format:
+        UPSTREAM.require_mistral_common()
+
     # Load model hyperparameters
     logger.info(f"Loading model: {args.model.name}")
-    hparams = Model.load_hparams(args.model)
-    
+    hparams = UPSTREAM.load_hparams(args.model, is_mistral_format)
+
     # Debug: Print the hyperparameters structure
     if args.verbose:
         logger.debug(f"Model hyperparameters: {json.dumps(hparams, indent=2, default=str)}")
         if "text_config" in hparams:
             logger.debug(f"text_config: {json.dumps(hparams['text_config'], indent=2, default=str)}")
             logger.debug(f"num_hidden_layers: {hparams['text_config'].get('num_hidden_layers')}")
-    
+
     try:
-        # Get model architecture
-        model_architecture = hparams["architectures"][0]
-        logger.info(f"Model architecture: {model_architecture}")
-        
-        # For Llama4 models, ensure we have the necessary parameters
-        if model_architecture == "Llama4ForConditionalGeneration":
-            # Pre-process the hparams to make them compatible with the converter
-            if "text_config" in hparams and "num_hidden_layers" in hparams["text_config"]:
-                # Copy essential parameters to the top level
-                hparams["num_hidden_layers"] = hparams["text_config"]["num_hidden_layers"]
-                logger.info(f"Using num_hidden_layers from text_config: {hparams['num_hidden_layers']}")
-                
-                # Copy other essential parameters if needed
-                for param in ["hidden_size", "intermediate_size", "num_attention_heads", "num_key_value_heads", "vocab_size"]:
-                    if param in hparams["text_config"]:
-                        hparams[param] = hparams["text_config"][param]
-                        logger.debug(f"Copied {param}: {hparams[param]}")
-        
-        # Get model class
-        try:
-            model_class = Model.from_model_architecture(model_architecture)
+        # Resolve the model class. Both steps delegate to llama.cpp so that every
+        # architecture it supports is available here too — and so that a future
+        # upstream refactor does not silently strand this tool again.
+        if is_mistral_format:
+            # params.json has no "architectures"; upstream selects the class from
+            # the payload shape instead.
+            model_class = UPSTREAM.mistral_model_class(hparams)
+            logger.info(f"Mistral format detected; using model class: {model_class.__name__}")
+        else:
+            model_architecture = UPSTREAM.model_architecture(hparams)
+            logger.info(f"Model architecture: {model_architecture}")
+            try:
+                model_class = UPSTREAM.model_class(model_architecture)
+            except NotImplementedError:
+                logger.error(f"Model {model_architecture} is not supported by llama.cpp")
+                sys.exit(1)
             logger.info(f"Using model class: {model_class.__name__}")
-        except NotImplementedError:
-            logger.error(f"Model {model_architecture} is not supported")
-            sys.exit(1)
-        
+
         # Create model instance
         import torch
         with torch.inference_mode():

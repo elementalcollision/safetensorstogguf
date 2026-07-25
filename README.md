@@ -35,10 +35,18 @@ A toolkit for working with Hugging Face models and GGUF format for use with [lla
 
 ### llama.cpp compatibility
 
-`safetensors_to_gguf.py` loads classes out of llama.cpp's `convert_hf_to_gguf.py`, so it tracks that file's (occasionally breaking) refactors:
+`safetensors_to_gguf.py` drives llama.cpp's own conversion code, which has changed shape several times. Rather than pinning one layout, the tool now **probes** for whatever the checkout it is pointed at provides, and delegates architecture resolution and class lookup to llama.cpp itself. Supported generations:
 
-- **`Model` → `ModelBase`** — [ggml-org/llama.cpp#17114](https://github.com/ggml-org/llama.cpp/pull/17114) (merged 2026-05-15, commit `cc7200bf`) renamed the base class and a later change split the converter into a `conversion` package. On affected checkouts older code failed with `module 'convert_hf_to_gguf' has no attribute 'Model'`. This tool now accepts **either** `Model` or `ModelBase`, so current llama.cpp works out of the box.
-- **If you still hit an "Incompatible llama.cpp" error**, the converter API has changed again. The most reliable fallback is to check out a llama.cpp commit from **before #17114** (i.e. an ancestor of `cc7200bf`) and point to it with `--llama-cpp-dir`. Please also open an issue here with the llama.cpp commit hash so the loader can be updated.
+| llama.cpp | Shape | Status |
+|---|---|---|
+| before [#14737](https://github.com/ggml-org/llama.cpp/pull/14737) (`a3a7874`, 2025-08-11) | `load_hparams(dir_model)`; no Mistral format | supported (`--mistral-format` unavailable) |
+| #14737 … before [#17114](https://github.com/ggml-org/llama.cpp/pull/17114) | `load_hparams(dir_model, is_mistral_format)`; monolithic `convert_hf_to_gguf.py` with an eagerly-populated class registry | supported |
+| [#17114](https://github.com/ggml-org/llama.cpp/pull/17114) (`cc7200bf`, 2026-05-15) and later | converter split into a `conversion` package; `convert_hf_to_gguf.py` re-exports helpers only and model classes register **lazily** via `get_model_class` | supported |
+
+Because class lookup now goes through llama.cpp's `get_model_class` (which imports the owning `conversion.<family>` module on demand) rather than a bare registry read, **every architecture llama.cpp supports is available here** — 234 text architectures and 55 multimodal projectors at the time of writing, not just Llama-family models.
+
+- **Mistral-native models** (a `params.json` and `consolidated*.safetensors`, no `config.json`) are detected automatically and converted with llama.cpp's `MistralModel` / `MistralMoeModel`. Force the choice with `--mistral-format` / `--no-mistral-format`. This path additionally requires the [`mistral-common`](https://pypi.org/project/mistral-common/) package.
+- **If you hit an "Incompatible llama.cpp" error**, the converter API has changed in a way this loader does not yet understand. Please open an issue with the llama.cpp commit hash. Pointing `--llama-cpp-dir` at an older checkout is still a valid workaround.
 
 ## Project Structure and File Map
 
@@ -114,6 +122,7 @@ python convert_and_quantize.py --safetensors-dir /path/to/model --type q4_k
 - `--threads`: Number of threads to use for conversion (default: number of CPU cores)
 - `--verbose`: Enable verbose logging
 - `--llama-cpp-dir`: Path to the llama.cpp directory (default: auto-detect)
+- `--mistral-format` / `--no-mistral-format`: Force or disable Mistral-native conversion (`params.json` + `consolidated*.safetensors`). Auto-detected by default; requires `mistral-common`
 
 ## Examples
 
@@ -191,12 +200,15 @@ This tool has been tested with:
 
 ## How It Works
 
-The script leverages llama.cpp's conversion utilities to handle the conversion process. It adds special handling for Llama-4 models, including:
+The script drives llama.cpp's own conversion code rather than reimplementing it:
 
-1. Support for the Mixture of Experts (MoE) architecture by skipping router weights and expert layers
-2. Custom tokenizer handling for the new tokenizer format used in Llama-4
-3. Proper handling of nested configuration parameters in Llama-4 models
-4. Skipping multimodal components for vision-language models
+1. **Locate and probe llama.cpp** — resolve the base class (`ModelBase`, or `Model` on pre-2025 checkouts) and detect which helpers this checkout provides (`conversion` package vs monolithic module, `get_model_class`, `get_model_architecture`).
+2. **Load hyperparameters** — call `load_hparams` with or without `is_mistral_format` depending on the signature actually present.
+3. **Resolve the architecture** — via llama.cpp's `get_model_architecture`, which understands nested layouts (`text_config`, InternVL's `llm_config`, Qwen2.5-Omni's `thinker_config`, non-HF Mamba's `ssm_cfg`).
+4. **Resolve the model class** — via `get_model_class`, which imports the owning `conversion.<family>` module on demand. This is what makes the full llama.cpp model catalogue available.
+5. **Convert** — instantiate that class and write the GGUF.
+
+Llama-4 (including the MoE variants) is handled by llama.cpp's own `Llama4Model`. Earlier releases of this tool substituted a local subclass that dropped router and expert tensors; that produced files some runtimes would not load, and it has been removed.
 
 ## License
 
@@ -209,7 +221,7 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 ## Current Limitations
 
-There seems to be some issues appearing with loading the Llama-4 model after conversion. This was tested on LM Studio and will require some additional work to ensure it functions correctly. Future updates will address these compatibility issues.
+Earlier releases converted Llama-4 with a local subclass that skipped router and expert tensors, and the resulting files did not load correctly in LM Studio. Llama-4 now goes through llama.cpp's own `Llama4Model` with all tensors intact, which should resolve that; reports from real Llama-4 conversions are welcome.
 
 ## GGUF Quantization Command Line Options
 
