@@ -3,9 +3,17 @@ import os
 import sys
 import argparse
 import logging
-import subprocess
-import re
 from pathlib import Path
+
+# Reuse the quantizer's GGUF readers and MoE tensor-name fragments so the two
+# analysis paths cannot drift apart.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from quantize_gguf import (
+    MOE_EXPERT_TENSORS,
+    MOE_ROUTER_TENSORS,
+    read_gguf_metadata,
+    read_gguf_tensors,
+)
 import json
 
 # Set up logging
@@ -25,102 +33,40 @@ def analyze_model_structure(model_path, llama_cpp_dir=None):
     """
     logger.info(f"Analyzing model structure: {model_path}")
     
-    # Find llama-quantize binary
-    if llama_cpp_dir is None:
-        # Try the LLAMA_CPP_DIR environment variable, then locations relative to
-        # the script.
-        script_dir = Path(os.path.dirname(os.path.abspath(__file__)))
-        possible_paths = []
-        if os.environ.get("LLAMA_CPP_DIR"):
-            possible_paths.append(Path(os.environ["LLAMA_CPP_DIR"]))
-        possible_paths.extend([
-            script_dir.parent.parent,  # If script is in llama.cpp/some_dir/safetensors-to-gguf
-            script_dir.parent,         # If script is in llama.cpp/safetensors-to-gguf
-            script_dir,                # If script is directly in llama.cpp
-        ])
+    # No llama-quantize binary is needed any more - the analysis reads the GGUF
+    # directly. --llama-cpp-dir is still honoured, but only so the bundled
+    # gguf-py can be located when the `gguf` package is not installed.
+    if llama_cpp_dir is not None:
+        os.environ.setdefault("LLAMA_CPP_DIR", str(llama_cpp_dir))
 
-        for path in possible_paths:
-            quantize_binary = path / "build" / "bin" / "llama-quantize"
-            if quantize_binary.exists():
-                llama_cpp_dir = path
-                logger.info(f"Found llama.cpp directory at: {llama_cpp_dir}")
-                break
-    
-    if llama_cpp_dir is None:
-        logger.error("Could not find llama.cpp directory with llama-quantize binary")
-        return None
-    
-    quantize_binary = llama_cpp_dir / "build" / "bin" / "llama-quantize"
-    if not quantize_binary.exists():
-        logger.error(f"llama-quantize binary not found at {quantize_binary}")
-        return None
-    
-    # Run llama-quantize with --dry-run to analyze the model
-    cmd = [str(quantize_binary), "--dry-run", "--verbose", str(model_path), "/dev/null", "q4_0"]
-    logger.info(f"Running command: {' '.join(cmd)}")
-    
+    # Read the model directly instead of shelling out to llama-quantize.
+    #
+    # The previous implementation ran `llama-quantize --dry-run --verbose <model>
+    # /dev/null q4_0` and regex-scraped the result, which could not work:
+    # --verbose is not a llama-quantize option (it prints usage and exits 1),
+    # llama.cpp logs through LLAMA_LOG_INFO whose default sink is stderr rather
+    # than the stdout being read, and sizes are reported in MiB rather than the
+    # MB the pattern required. Reading the GGUF needs no binary at all.
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        
-        if result.returncode != 0:
-            logger.warning(f"llama-quantize returned non-zero exit code: {result.returncode}")
-            logger.warning(f"Error output: {result.stderr}")
-            
-            # Check if the model is already quantized
-            if "already quantized" in result.stderr:
-                logger.info("Model appears to be already quantized")
-                return {"is_quantized": True, "error": result.stderr}
-            
-            # Try to extract useful information from stderr
-            return {"error": result.stderr}
-    except Exception as e:
-        logger.error(f"Error running llama-quantize: {e}")
-        return {"error": str(e)}
-    
-    # Parse the output to extract tensor information
-    tensor_info = []
-    
-    # Regular expression to match tensor information lines
-    tensor_pattern = r'\[\s*(\d+)/\s*(\d+)\]\s+(.*?)\s+-\s+\[(.*?)\],\s+type\s+=\s+(\S+),\s+size\s+=\s+([\d.]+)\s+MB'
-    
-    for line in result.stdout.split('\n'):
-        match = re.search(tensor_pattern, line)
-        if match:
-            tensor_idx = int(match.group(1))
-            total_tensors = int(match.group(2))
-            tensor_name = match.group(3).strip()
-            shape_str = match.group(4).strip()
-            shape = [int(x.strip()) for x in shape_str.split(',')]
-            tensor_type = match.group(5).strip()
-            size_mb = float(match.group(6))
-            
-            tensor_info.append({
-                'index': tensor_idx,
-                'name': tensor_name,
-                'shape': shape,
-                'type': tensor_type,
-                'size_mb': size_mb
-            })
-    
-    # If we couldn't extract tensor information, try a different approach
-    if not tensor_info:
-        logger.warning("Could not extract tensor information from llama-quantize output")
-        
-        # Check if the model name contains "Scout" to force MoE detection
-        model_name = os.path.basename(model_path)
-        is_moe = "scout" in model_name.lower() or "moe" in model_name.lower()
-        
-        if is_moe:
-            logger.info(f"Forcing MoE detection based on model name: {model_name}")
-            return {
-                "is_moe": True,
-                "forced_detection": True,
-                "model_name": model_name,
-                "error": "Could not extract tensor information, but model name suggests MoE architecture"
+        tensor_info = [
+            {
+                "index": i,
+                "name": t["name"],
+                "shape": [d for d in t["dimensions"] if d > 1] or [1],
+                "type": t["type"],
+                "size_mb": t["size_mb"],
             }
-        
-        return {"error": "Could not extract tensor information from llama-quantize output"}
-    
+            for i, t in enumerate(read_gguf_tensors(Path(model_path)))
+        ]
+        metadata = read_gguf_metadata(Path(model_path))
+    except Exception as e:
+        logger.error(f"Could not read GGUF file: {e}")
+        return {"error": str(e)}
+
+    if not tensor_info:
+        return {"error": f"No tensors found in {model_path}"}
+
+
     # Analyze tensor distribution
     total_tensors = len(tensor_info)
     logger.info(f"Total number of tensors: {total_tensors}")
@@ -147,11 +93,20 @@ def analyze_model_structure(model_path, llama_cpp_dir=None):
         size_mb = stats['size_mb']
         logger.info(f"  {tensor_type}: {count} tensors ({count/total_tensors*100:.2f}%), {size_mb:.2f} MB ({size_mb/total_size_mb*100:.2f}%)")
     
-    # Check for MoE components
-    moe_keywords = ['expert', 'router', 'moe', 'gate', 'ffn_gate', 'ffn_up', 'ffn_down']
-    moe_tensors = [t for t in tensor_info if any(kw in t['name'].lower() for kw in moe_keywords)]
-    
-    is_moe = len(moe_tensors) > 0
+    # MoE detection keyed on the tensor names llama.cpp emits. The earlier
+    # keyword list included 'gate', 'ffn_up' and 'ffn_down', which appear in
+    # every dense feed-forward block, so every model looked like an MoE.
+    def _is_expert(name):
+        return any(f in name for f in MOE_EXPERT_TENSORS) or "_exps" in name
+
+    def _is_router(name):
+        return any(f in name for f in MOE_ROUTER_TENSORS) or "exp_probs" in name
+
+    moe_tensors = [t for t in tensor_info
+                   if _is_expert(t['name'].lower()) or _is_router(t['name'].lower())]
+
+    # Experts are the load-bearing signal: a router alone is not an MoE.
+    is_moe = any(_is_expert(t['name'].lower()) for t in tensor_info)
     logger.info(f"\nIs MoE model: {is_moe}")
     
     if is_moe:
@@ -190,9 +145,9 @@ def analyze_model_structure(model_path, llama_cpp_dir=None):
     for tensor in tensor_info:
         name = tensor['name'].lower()
         
-        if 'expert' in name:
+        if _is_expert(name):
             categories['expert'].append(tensor)
-        elif 'router' in name or 'gate' in name:
+        elif _is_router(name):
             categories['router'].append(tensor)
         elif 'attn' in name:
             categories['attention'].append(tensor)
@@ -222,27 +177,19 @@ def analyze_model_structure(model_path, llama_cpp_dir=None):
         expert_tensors = categories['expert']
         expert_size = sum(t['size_mb'] for t in expert_tensors)
         
-        # Try to determine the number of experts
-        expert_patterns = {}
-        for tensor in expert_tensors:
-            name = tensor['name']
-            # Extract expert number using a simple heuristic
-            parts = name.split('expert')
-            if len(parts) > 1:
-                expert_num = ''.join([c for c in parts[1] if c.isdigit()])
-                if expert_num:
-                    if expert_num not in expert_patterns:
-                        expert_patterns[expert_num] = 0
-                    expert_patterns[expert_num] += 1
-        
-        if expert_patterns:
-            num_experts = len(expert_patterns)
-            logger.info(f"\nDetected {num_experts} experts in the model")
-            
-            # Show distribution of expert tensors
-            logger.info(f"Expert tensor distribution:")
-            for expert_num, count in sorted(expert_patterns.items(), key=lambda x: int(x[0])):
-                logger.info(f"  Expert {expert_num}: {count} tensors")
+        # The expert count comes from metadata, not from tensor names: llama.cpp
+        # stacks all experts of a projection into one tensor (blk.N.ffn_*_exps),
+        # so there is no per-expert name to count. The previous heuristic split
+        # names on 'expert' and always found nothing.
+        num_experts = metadata.get("expert_count") or 0
+        used = metadata.get("expert_used_count")
+        if num_experts:
+            logger.info(f"\n{num_experts} experts in the model"
+                        + (f", {used} active per token" if used else ""))
+            logger.info(f"Stacked expert tensors: {len(expert_tensors)}"
+                        f" ({expert_size:.2f} MB)")
+        else:
+            logger.info("\nExpert tensors present but no expert_count in metadata")
     
     # Prepare results
     results = {
