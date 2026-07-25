@@ -450,6 +450,11 @@ def parse_args():
         "--vocab-only", action="store_true",
         help="Extract only the vocabulary"
     )
+
+    parser.add_argument(
+        "--mistral-model", action="store_true",
+        help="Use the Mistral Specific flag for llamacpp "
+    )
     
     parser.add_argument(
         "--model-name", type=str,
@@ -547,7 +552,7 @@ def convert_safetensors_to_gguf(args):
     
     # Load model hyperparameters
     logger.info(f"Loading model: {args.model.name}")
-    hparams = Model.load_hparams(args.model)
+    hparams = Model.load_hparams(args.model, is_mistral_format=args.mistral_model)
     
     # Debug: Print the hyperparameters structure
     if args.verbose:
