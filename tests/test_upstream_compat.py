@@ -83,6 +83,18 @@ def get_model_architecture(hparams, model_type=ModelType.TEXT):
 '''
 
 
+_GGUF_PY = """
+class LlamaFileType:
+    ALL_F32 = 0
+    MOSTLY_F16 = 1
+    MOSTLY_BF16 = 32
+    MOSTLY_Q8_0 = 7
+    MOSTLY_TQ1_0 = 36
+    MOSTLY_TQ2_0 = 37
+    GUESSED = 1024
+"""
+
+
 def _write(path: Path, body: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(textwrap.dedent(body).lstrip(), encoding="utf-8")
@@ -91,7 +103,7 @@ def _write(path: Path, body: str) -> None:
 def make_modern_checkout(root: Path) -> Path:
     """llama.cpp at/after #17114: `conversion` package, lazy registry, no model
     classes re-exported from convert_hf_to_gguf.py."""
-    _write(root / "gguf-py" / "gguf.py", "class LlamaFileType:\n    MOSTLY_F16 = 1\n")
+    _write(root / "gguf-py" / "gguf.py", _GGUF_PY)
     _write(root / "conversion" / "base.py", _BASE_PY)
     _write(root / "conversion" / "__init__.py", '''
         from .base import ModelBase, ModelType, get_model_architecture
@@ -99,8 +111,12 @@ def make_modern_checkout(root: Path) -> Path:
         TEXT_MODEL_MAP = {
             "LlamaForCausalLM": "llama",
             "DeepseekV4ForCausalLM": "deepseek",
+            "VisionTextForConditionalGeneration": "vlm",
         }
-        MMPROJ_MODEL_MAP = {"PixtralVisionModel": "pixtral"}
+        MMPROJ_MODEL_MAP = {
+            "PixtralVisionModel": "pixtral",
+            "VisionTextForConditionalGeneration": "vlm",
+        }
 
         _mistral_common_installed = True
         _mistral_import_error_msg = "pip install mistral-common"
@@ -149,6 +165,22 @@ def make_modern_checkout(root: Path) -> Path:
         class PixtralModel(ModelBase):
             is_mistral_format = True
     ''')
+    # One architecture, two classes - which one you get depends on ModelType.
+    # Mirrors e.g. DeepseekOCRForCausalLM upstream.
+    _write(root / "conversion" / "vlm.py", '''
+        from .base import ModelBase, ModelType
+
+
+        @ModelBase.register("VisionTextForConditionalGeneration")
+        class VlmTextModel(ModelBase):
+            pass
+
+
+        @ModelBase.register("VisionTextForConditionalGeneration",
+                            model_type=ModelType.MMPROJ)
+        class VlmVisionModel(ModelBase):
+            pass
+    ''')
     # The real post-#17114 entrypoint re-exports helpers only - no model classes.
     _write(root / "convert_hf_to_gguf.py", '''
         from conversion import (
@@ -169,7 +201,7 @@ def make_monolithic_checkout(root: Path, *, mistral_arg: bool = True) -> Path:
     With ``mistral_arg=False`` this reproduces llama.cpp before #14737
     (2025-08-11), when ``load_hparams`` took a single argument.
     """
-    _write(root / "gguf-py" / "gguf.py", "class LlamaFileType:\n    MOSTLY_F16 = 1\n")
+    _write(root / "gguf-py" / "gguf.py", _GGUF_PY)
     body = _BASE_PY
     if not mistral_arg:
         body = body.replace(
@@ -304,6 +336,143 @@ class TestModernCheckout(UpstreamCompatTestCase):
             upstream.mistral_model_class({"vision_encoder": {}}, mmproj=True).__name__,
             "PixtralModel",
         )
+
+
+class TestMmproj(UpstreamCompatTestCase):
+    """--mmproj routes to llama.cpp's multimodal-projector classes."""
+
+    def setUp(self):
+        super().setUp()
+        self.checkout = make_modern_checkout(self.tmp / "llama.cpp")
+
+    def test_same_architecture_resolves_to_different_classes(self):
+        # The whole point of ModelType routing: one arch, two classes.
+        upstream = self.load(self.checkout)
+        arch = "VisionTextForConditionalGeneration"
+        self.assertEqual(upstream.model_class(arch).__name__, "VlmTextModel")
+        self.assertEqual(
+            upstream.model_class(arch, mmproj=True).__name__, "VlmVisionModel"
+        )
+
+    def test_text_only_model_has_no_projector(self):
+        upstream = self.load(self.checkout)
+        with self.assertRaises(NotImplementedError):
+            upstream.model_class("LlamaForCausalLM", mmproj=True)
+
+    def test_mistral_projector_selection(self):
+        upstream = self.load(self.checkout)
+        hparams = {"vision_encoder": {"hidden_size": 1024}}
+        self.assertEqual(
+            upstream.mistral_model_class(hparams, mmproj=True).__name__, "PixtralModel"
+        )
+        # Same hparams without --mmproj stays on the text model.
+        self.assertEqual(upstream.mistral_model_class(hparams).__name__, "MistralModel")
+
+    def test_mistral_projector_requires_vision_encoder(self):
+        upstream = self.load(self.checkout)
+        with self.assertRaises(ValueError):
+            upstream.mistral_model_class({"dim": 4096}, mmproj=True)
+
+    def test_model_type_routing(self):
+        upstream = self.load(self.checkout)
+        self.assertNotEqual(upstream._model_type(False), upstream._model_type(True))
+
+
+class TestMmprojCli(unittest.TestCase):
+    """CLI-level behaviour of --mmproj (argument wiring, naming, guards)."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.checkout = make_modern_checkout(self.tmp / "llama.cpp")
+        self.model = make_model_dir(self.tmp / "model")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _run(self, *extra):
+        import subprocess
+        return subprocess.run(
+            [sys.executable, str(REPO_ROOT / "safetensors_to_gguf.py"),
+             "--model", str(self.model),
+             "--llama-cpp-dir", str(self.checkout), *extra],
+            capture_output=True, text=True,
+        )
+
+    def test_flag_exists(self):
+        out = self._run("--help").stdout
+        self.assertIn("--mmproj", out)
+
+    def test_mmproj_with_vocab_only_is_rejected(self):
+        r = self._run("--mmproj", "--vocab-only")
+        self.assertEqual(r.returncode, 2)  # argparse usage error
+        self.assertIn("mutually exclusive", r.stdout + r.stderr)
+
+    def test_unsupported_projector_reports_actionable_error(self):
+        # LlamaForCausalLM is text-only: say so, and say what to do about it.
+        r = self._run("--mmproj")
+        combined = r.stdout + r.stderr
+        self.assertIn("has no multimodal projector", combined)
+        self.assertIn("drop --mmproj", combined)
+
+    def test_projector_routes_to_vision_class(self):
+        vlm = make_model_dir(self.tmp / "vlm",
+                             arch="VisionTextForConditionalGeneration")
+        import subprocess
+        def run(*extra):
+            r = subprocess.run(
+                [sys.executable, str(REPO_ROOT / "safetensors_to_gguf.py"),
+                 "--model", str(vlm), "--llama-cpp-dir", str(self.checkout), *extra],
+                capture_output=True, text=True)
+            return r.stdout + r.stderr
+        # Same architecture, different class depending on --mmproj.
+        self.assertIn("VlmVisionModel", run("--mmproj"))
+        self.assertIn("VlmTextModel", run())
+
+
+class TestOutfileNaming(unittest.TestCase):
+    """Output-path selection is pure logic - no torch, no llama.cpp."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        sys.path.insert(0, str(REPO_ROOT))
+        self.stg = importlib.import_module("safetensors_to_gguf")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    class _Args:
+        def __init__(self, model, mmproj=False, outfile=None, model_name=None):
+            self.model = model
+            self.mmproj = mmproj
+            self.outfile = outfile
+            self.model_name = model_name
+
+    def test_text_default_has_no_prefix(self):
+        out = self.stg.resolve_outfile(self._Args(self.tmp / "MyModel"))
+        self.assertEqual(out.name, "MyModel.gguf")
+
+    def test_projector_default_gets_prefix(self):
+        out = self.stg.resolve_outfile(self._Args(self.tmp / "MyModel", mmproj=True))
+        self.assertEqual(out.name, "mmproj-MyModel.gguf")
+
+    def test_text_and_projector_do_not_collide(self):
+        model = self.tmp / "MyModel"
+        self.assertNotEqual(
+            self.stg.resolve_outfile(self._Args(model)),
+            self.stg.resolve_outfile(self._Args(model, mmproj=True)),
+        )
+
+    def test_explicit_outfile_always_wins(self):
+        explicit = self.tmp / "chosen.gguf"
+        for mmproj in (False, True):
+            out = self.stg.resolve_outfile(
+                self._Args(self.tmp / "MyModel", mmproj=mmproj, outfile=explicit))
+            self.assertEqual(out, explicit)
+
+    def test_model_name_override_is_honoured(self):
+        out = self.stg.resolve_outfile(
+            self._Args(self.tmp / "MyModel", mmproj=True, model_name="custom"))
+        self.assertEqual(out.name, "mmproj-custom.gguf")
 
 
 class TestMonolithicCheckout(UpstreamCompatTestCase):

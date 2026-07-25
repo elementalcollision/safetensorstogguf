@@ -335,7 +335,14 @@ def parse_args():
         "--vocab-only", action="store_true",
         help="Extract only the vocabulary"
     )
-    
+
+    parser.add_argument(
+        "--mmproj", action="store_true",
+        help="Export the multimodal projector (vision encoder) instead of the text model. "
+             "Only works on vision models llama.cpp supports for mmproj export. "
+             "An 'mmproj-' prefix is added to the default output filename."
+    )
+
     parser.add_argument(
         "--model-name", type=str,
         help="Override the model name in the GGUF file metadata"
@@ -373,7 +380,28 @@ def parse_args():
         help="Disable Mistral-format auto-detection and force HuggingFace format."
     )
 
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    # A projector carries no vocabulary; upstream's MmprojModel.write_vocab()
+    # raises. Reject the combination up front rather than mid-conversion.
+    if args.mmproj and args.vocab_only:
+        parser.error("--mmproj and --vocab-only are mutually exclusive: a multimodal "
+                     "projector has no vocabulary to export")
+
+    return args
+
+
+def resolve_outfile(args) -> Path:
+    """Pick the output path, honouring --outfile when given.
+
+    Projector exports take llama.cpp's ``mmproj-`` prefix so a text model and its
+    projector can be written into the same directory without colliding.
+    """
+    if args.outfile is not None:
+        return args.outfile
+    model_name = args.model_name or args.model.name
+    prefix = "mmproj-" if args.mmproj else ""
+    return args.model / f"{prefix}{model_name}.gguf"
 
 
 def resolve_mistral_format(args) -> bool:
@@ -483,35 +511,44 @@ def convert_safetensors_to_gguf(args):
         # Resolve the model class. Both steps delegate to llama.cpp so that every
         # architecture it supports is available here too — and so that a future
         # upstream refactor does not silently strand this tool again.
+        if args.mmproj:
+            logger.info("Exporting the multimodal projector (--mmproj)")
         if is_mistral_format:
             # params.json has no "architectures"; upstream selects the class from
             # the payload shape instead.
-            model_class = UPSTREAM.mistral_model_class(hparams)
+            try:
+                model_class = UPSTREAM.mistral_model_class(hparams, mmproj=args.mmproj)
+            except ValueError as e:
+                logger.error(str(e))
+                sys.exit(1)
             logger.info(f"Mistral format detected; using model class: {model_class.__name__}")
         else:
-            model_architecture = UPSTREAM.model_architecture(hparams)
+            model_architecture = UPSTREAM.model_architecture(hparams, mmproj=args.mmproj)
             logger.info(f"Model architecture: {model_architecture}")
             try:
-                model_class = UPSTREAM.model_class(model_architecture)
+                model_class = UPSTREAM.model_class(model_architecture, mmproj=args.mmproj)
             except NotImplementedError:
-                logger.error(f"Model {model_architecture} is not supported by llama.cpp")
+                if args.mmproj:
+                    logger.error(
+                        f"Model {model_architecture} has no multimodal projector in "
+                        f"llama.cpp; drop --mmproj to convert the text model"
+                    )
+                else:
+                    logger.error(f"Model {model_architecture} is not supported by llama.cpp")
                 sys.exit(1)
             logger.info(f"Using model class: {model_class.__name__}")
+
+        # Decide where to write before touching torch, so a bad path or a naming
+        # surprise surfaces immediately.
+        outfile = resolve_outfile(args)
+        if args.outfile is None:
+            logger.info(f"No output file specified, writing to model directory: {outfile}")
 
         # Create model instance
         import torch
         with torch.inference_mode():
             logger.info("Creating model instance...")
-            
-            # Ensure we have a valid output filename
-            outfile = args.outfile
-            if outfile is None:
-                # Generate a default output filename in the same directory as the model
-                model_name = args.model_name or args.model.name
-                # Use the model directory as the output directory
-                outfile = args.model / f"{model_name}.gguf"
-                logger.info(f"No output file specified, writing to model directory: {outfile}")
-            
+
             # Set optimization flags in hparams for the model to use
             if args.optimize_for_size or args.optimize_output_tensor or args.optimize_token_embeddings:
                 hparams["optimize_for_size"] = args.optimize_for_size

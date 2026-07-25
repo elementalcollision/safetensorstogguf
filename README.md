@@ -5,10 +5,11 @@ A toolkit for working with Hugging Face models and GGUF format for use with [lla
 ## Features
 
 ### SafeTensors to GGUF Conversion
-- Converts SafeTensors model files to GGUF format
-- Supports Llama-4 models with Mixture of Experts (MoE) architecture
-- Handles multimodal models by skipping vision components
-- Supports custom tokenizer formats used in Llama-4
+- Converts SafeTensors model files to GGUF by driving llama.cpp's own converter
+- **Every architecture llama.cpp supports** — 234 text architectures and 55 multimodal projectors — resolved through llama.cpp's own dispatch, not a hardcoded list
+- **Mistral-native models** (`params.json` + `consolidated*.safetensors`) detected automatically
+- **Multimodal projector export** with `--mmproj`, for the vision models llama.cpp supports
+- **Version-adaptive**: probes the llama.cpp checkout you point it at and adapts, instead of pinning one API shape
 - Automatically detects the llama.cpp directory or allows custom path specification
 
 ### GGUF Quantization
@@ -21,14 +22,15 @@ A toolkit for working with Hugging Face models and GGUF format for use with [lla
 
 ### Two-Step Conversion and Quantization for MoE Models
 - Single script that handles both conversion and quantization in one command
-- Specifically designed for Llama-4 Scout and other MoE models
+- Useful for MoE models, whose experts often need different quantization than the rest
 - Creates uncompressed intermediate GGUF files (F16/F32) before quantization
 - Solves the issue of models that are already in a compressed format
 
 ## Requirements
 
-- Python 3.8 or higher
+- **Python 3.10 or higher** — llama.cpp's converter declares `requires-python = '>=3.10,<3.15'`, and this tool imports it
 - Python packages: `numpy`, `torch`, `transformers`, `safetensors`, `sentencepiece` (install via `pip install -r requirements.txt`)
+- Optional: [`mistral-common`](https://pypi.org/project/mistral-common/), required only to convert Mistral-native models
 - Access to llama.cpp repository (either as a parent directory or specified via command line)
 
 > **Why `transformers`?** `safetensors_to_gguf.py` delegates the actual conversion to llama.cpp's `convert_hf_to_gguf.py`, which imports `transformers`, `safetensors`, and `sentencepiece`. If these are not installed you will see errors such as `No module named 'transformers'`, even though this repo's own scripts don't import them directly.
@@ -46,6 +48,7 @@ A toolkit for working with Hugging Face models and GGUF format for use with [lla
 Because class lookup now goes through llama.cpp's `get_model_class` (which imports the owning `conversion.<family>` module on demand) rather than a bare registry read, **every architecture llama.cpp supports is available here** — 234 text architectures and 55 multimodal projectors at the time of writing, not just Llama-family models.
 
 - **Mistral-native models** (a `params.json` and `consolidated*.safetensors`, no `config.json`) are detected automatically and converted with llama.cpp's `MistralModel` / `MistralMoeModel`. Force the choice with `--mistral-format` / `--no-mistral-format`. This path additionally requires the [`mistral-common`](https://pypi.org/project/mistral-common/) package.
+- **Multimodal projectors** are exported with `--mmproj`, which routes to llama.cpp's projector class for the architecture (`PixtralModel` for Mistral-native vision models, `Gemma3VisionModel`, `Qwen3VLVisionModel`, and so on). 42 architectures resolve to a *different* class depending on whether `--mmproj` is set, so the same model directory yields either the text model or its projector.
 - **If you hit an "Incompatible llama.cpp" error**, the converter API has changed in a way this loader does not yet understand. Please open an issue with the llama.cpp commit hash. Pointing `--llama-cpp-dir` at an older checkout is still a valid workaround.
 
 ## Project Structure and File Map
@@ -54,13 +57,15 @@ This toolkit is organized as a set of standalone CLI utilities and supporting fi
 
 | File                        | Purpose                                                                 | Key Dependencies                |
 |-----------------------------|-------------------------------------------------------------------------|----------------------------------|
-| `safetensors_to_gguf.py`    | Main CLI tool to convert SafeTensors models to GGUF format. Handles Llama-4 and MoE specifics. | Python stdlib, `numpy`, `llama.cpp` Python modules (`gguf`), access to `llama.cpp` repo |
+| `safetensors_to_gguf.py`    | Main CLI tool to convert SafeTensors models to GGUF. Probes the llama.cpp checkout and delegates architecture/class resolution to it. | Python stdlib, `numpy`, `llama.cpp` Python modules (`gguf`), access to `llama.cpp` repo |
 | `convert_and_quantize.py`   | Two-step CLI tool for MoE models: converts SafeTensors to uncompressed GGUF, then quantizes. Calls `safetensors_to_gguf.py` and uses `llama-quantize` binary. | Python stdlib, `numpy`, subprocess, `llama.cpp` binaries, `safetensors_to_gguf.py` |
 | `quantize_gguf.py`          | CLI tool to quantize GGUF models using `llama.cpp`'s quantization utilities. | Python stdlib, `numpy`, subprocess, `llama.cpp` binaries |
 | `analyze_gguf.py`           | CLI tool to analyze GGUF model structure using the `gguf` Python module. | Python stdlib, `numpy`, `llama.cpp` Python modules (`gguf`) |
 | `analyze_gguf_simple.py`    | Simpler GGUF analyzer using the `llama-quantize` binary for tensor info. | Python stdlib, `numpy`, subprocess, `llama.cpp` binaries |
 | `analyze_model.py`          | Analyzes GGUF model structure, especially for MoE detection, using the `llama-quantize` binary. | Python stdlib, `numpy`, subprocess, `llama.cpp` binaries |
 | `model_analysis.json`       | (Optional) Stores model analysis results. Used for reference or output. | -                                |
+| `tests/test_upstream_compat.py` | Compatibility tests. Builds miniature llama.cpp checkouts for each converter generation and asserts the adapter handles all of them. Needs neither torch nor a real llama.cpp. | Python stdlib (`unittest`) |
+| `requirements.txt`          | Python dependencies.                                                    | -                                |
 | `LICENSE`, `.gitignore`     | Standard project files.                                                 | -                                |
 | `README.md`                 | Project documentation and usage instructions.                           | -                                |
 
@@ -116,13 +121,15 @@ python convert_and_quantize.py --safetensors-dir /path/to/model --type q4_k
 - `--outtype`: Output data type (default: auto)
   - Options: f32, f16, bf16, q8_0, tq1_0, tq2_0, auto
 - `--bigendian`: Use big endian format for output file (default: little endian / x86)
-- `--vocab-only`: Extract only the vocabulary
+- `--vocab-only`: Extract only the vocabulary (mutually exclusive with `--mmproj`)
+- `--mmproj`: Export the multimodal projector (vision encoder) instead of the text model. Only works on vision models llama.cpp supports for projector export; adds an `mmproj-` prefix to the default output filename
 - `--model-name`: Override the model name in the GGUF file metadata
 - `--metadata`: Path to a JSON file containing metadata to add to the GGUF file
 - `--threads`: Number of threads to use for conversion (default: number of CPU cores)
 - `--verbose`: Enable verbose logging
 - `--llama-cpp-dir`: Path to the llama.cpp directory (default: auto-detect)
 - `--mistral-format` / `--no-mistral-format`: Force or disable Mistral-native conversion (`params.json` + `consolidated*.safetensors`). Auto-detected by default; requires `mistral-common`
+- `--optimize-for-size`, `--optimize-output-tensor`, `--optimize-token-embeddings`: **No-ops.** These set hints in `hparams` that no current llama.cpp model class reads. Retained for CLI compatibility; use `quantize_gguf.py` to actually reduce model size
 
 ## Examples
 
@@ -142,6 +149,32 @@ python safetensors_to_gguf.py --model /path/to/Llama-4-Scout-17B-16E-Instruct --
 
 ```bash
 python safetensors_to_gguf.py --model /path/to/Llama-4-Scout-17B-16E-Instruct --vocab-only
+```
+
+### Converting a Mistral-Native Model
+
+Mistral-native layouts (`params.json` + `consolidated*.safetensors`, no `config.json`) are detected automatically — no flag needed:
+
+```bash
+python safetensors_to_gguf.py --model /path/to/Ministral-3-3B-Instruct-2512
+```
+
+Repositories that ship *both* layouts default to HuggingFace format, matching llama.cpp. Force the Mistral path explicitly:
+
+```bash
+python safetensors_to_gguf.py --model /path/to/Mistral-7B-Instruct-v0.3 --mistral-format
+```
+
+### Exporting a Multimodal Projector
+
+For vision models, the projector is a separate GGUF alongside the text model:
+
+```bash
+# text model  -> MyVisionModel.gguf
+python safetensors_to_gguf.py --model /path/to/MyVisionModel
+
+# projector   -> mmproj-MyVisionModel.gguf
+python safetensors_to_gguf.py --model /path/to/MyVisionModel --mmproj
 ```
 
 ### Basic GGUF Quantization
@@ -194,9 +227,21 @@ python quantize_gguf.py --model /path/to/Llama-4-Scout-17B-16E-Instruct.gguf --t
 
 ## Supported Models
 
-This tool has been tested with:
-- Llama-4 models (including the Mixture of Experts variants)
-- Other models supported by llama.cpp's convert_hf_to_gguf.py
+Model support is **whatever your llama.cpp checkout supports** — the architecture is resolved by llama.cpp's own `get_model_architecture` and the class by its `get_model_class`, so there is no list in this repo to fall out of date. Against llama.cpp `fb92d8f` that is **234 text architectures across 70 modules** and **55 multimodal projectors across 26 modules**: Llama, Qwen, DeepSeek, Gemma, GLM, Granite, Mistral, Mamba, Kimi, MiniMax, Ernie, Hunyuan, Phi, and so on.
+
+To see the catalogue your checkout offers:
+
+```bash
+python /path/to/llama.cpp/convert_hf_to_gguf.py --print-supported-models
+```
+
+End-to-end conversions verified against llama.cpp `fb92d8f`:
+
+| model | path exercised | result |
+|---|---|---|
+| `DeepseekV3ForCausalLM` (tiny-random) | HF format, lazy class registry | 34 tensors, MoE experts stacked and retained |
+| `Ministral-3-3B-Instruct-2512` | Mistral-native, auto-detected | 236 tensors, 6.86 GB, all hyperparameters carried through |
+| `Gemma3ForConditionalGeneration` | `--mmproj` routing | resolves `Gemma3VisionModel` vs `Gemma3Model` |
 
 ## How It Works
 
@@ -205,10 +250,20 @@ The script drives llama.cpp's own conversion code rather than reimplementing it:
 1. **Locate and probe llama.cpp** — resolve the base class (`ModelBase`, or `Model` on pre-2025 checkouts) and detect which helpers this checkout provides (`conversion` package vs monolithic module, `get_model_class`, `get_model_architecture`).
 2. **Load hyperparameters** — call `load_hparams` with or without `is_mistral_format` depending on the signature actually present.
 3. **Resolve the architecture** — via llama.cpp's `get_model_architecture`, which understands nested layouts (`text_config`, InternVL's `llm_config`, Qwen2.5-Omni's `thinker_config`, non-HF Mamba's `ssm_cfg`).
-4. **Resolve the model class** — via `get_model_class`, which imports the owning `conversion.<family>` module on demand. This is what makes the full llama.cpp model catalogue available.
+4. **Resolve the model class** — via `get_model_class`, which imports the owning `conversion.<family>` module on demand. This is what makes the full llama.cpp model catalogue available. With `--mmproj` the lookup is done under `ModelType.MMPROJ`, which for 42 architectures returns a different class than the text lookup.
 5. **Convert** — instantiate that class and write the GGUF.
 
+Mistral-native models skip steps 3–4: `params.json` has no `architectures` key, so the class is chosen from the payload shape exactly as llama.cpp does it (`PixtralModel` under `--mmproj`, `MistralMoeModel` when a `moe` key is present, otherwise `MistralModel`).
+
 Llama-4 (including the MoE variants) is handled by llama.cpp's own `Llama4Model`. Earlier releases of this tool substituted a local subclass that dropped router and expert tensors; that produced files some runtimes would not load, and it has been removed.
+
+## Testing
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+The suite builds miniature llama.cpp checkouts reproducing each generation of the converter's public surface — one-argument monolith, two-argument monolith, and the `conversion` package — and asserts the adapter handles all three. It needs neither torch nor a real llama.cpp checkout and runs in well under a second.
 
 ## License
 
@@ -221,7 +276,11 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 ## Current Limitations
 
-Earlier releases converted Llama-4 with a local subclass that skipped router and expert tensors, and the resulting files did not load correctly in LM Studio. Llama-4 now goes through llama.cpp's own `Llama4Model` with all tensors intact, which should resolve that; reports from real Llama-4 conversions are welcome.
+- **Llama-4 output is unverified on real weights.** Earlier releases converted Llama-4 with a local subclass that skipped router and expert tensors, and those files did not load correctly in LM Studio. Llama-4 now goes through llama.cpp's own `Llama4Model` with all tensors intact, which should resolve it — but no full Llama-4 conversion has been run since. Reports welcome.
+- **Converted files have not been load-tested in a llama.cpp runtime.** Outputs are validated structurally (read back with `GGUFReader`, metadata cross-checked against the source config), not by running inference.
+- **The `--optimize-*` flags are inert.** `--optimize-for-size`, `--optimize-output-tensor` and `--optimize-token-embeddings` are passed into `hparams` but no current llama.cpp model class reads them. They are kept for CLI compatibility and do nothing.
+- **Pre-#17114 llama.cpp is covered by tests, not by a real run.** The monolithic and one-argument `load_hparams` generations are exercised against stub checkouts; recent end-to-end runs all used current llama.cpp.
+- **`--mmproj` requires a model llama.cpp ships a projector class for.** Anything else exits with a message telling you to drop the flag.
 
 ## GGUF Quantization Command Line Options
 
