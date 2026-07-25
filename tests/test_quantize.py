@@ -178,5 +178,58 @@ class TestMoeDetection(unittest.TestCase):
         self.assertFalse(quantize_gguf.analyze_model_structure(path)["has_moe"])
 
 
+@unittest.skipUnless(HAVE_GGUF, "gguf module not available")
+class TestGgufMetadata(unittest.TestCase):
+    """Expert counts come from GGUF metadata, not from tensor names."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _write_moe(self, path, experts=8, used=2):
+        import numpy as np
+        from gguf import GGUFWriter
+        w = GGUFWriter(str(path), "llama")
+        w.add_block_count(1)
+        w.add_expert_count(experts)
+        w.add_expert_used_count(used)
+        for name in ("blk.0.ffn_gate_exps.weight", "blk.0.ffn_gate_inp.weight"):
+            w.add_tensor(name, np.zeros((2, 32), dtype=np.float32))
+        w.write_header_to_file(); w.write_kv_data_to_file(); w.write_tensors_to_file(); w.close()
+        return path
+
+    def test_reads_architecture(self):
+        path = write_gguf(self.tmp / "m.gguf", DENSE_TENSORS)
+        self.assertEqual(quantize_gguf.read_gguf_metadata(path)["architecture"], "llama")
+
+    def test_reads_expert_counts(self):
+        # Experts are stacked into one tensor per projection, so the count is
+        # only available from metadata - it cannot be derived from names.
+        path = self._write_moe(self.tmp / "moe.gguf", experts=256, used=8)
+        meta = quantize_gguf.read_gguf_metadata(path)
+        self.assertEqual(meta["expert_count"], 256)
+        self.assertEqual(meta["expert_used_count"], 8)
+
+    def test_dense_model_has_no_expert_count(self):
+        path = write_gguf(self.tmp / "d.gguf", DENSE_TENSORS)
+        self.assertIn(quantize_gguf.read_gguf_metadata(path).get("expert_count"), (None, 0))
+
+
+class TestConvertAndQuantizeSharesMoeMapping(unittest.TestCase):
+    """convert_and_quantize.py must not carry its own copy of the mapping."""
+
+    def test_imports_the_shared_helper(self):
+        import convert_and_quantize
+        self.assertIs(convert_and_quantize.moe_tensor_type_args,
+                      quantize_gguf.moe_tensor_type_args)
+
+    def test_help_no_longer_claims_the_flags_are_ignored(self):
+        source = (REPO_ROOT / "convert_and_quantize.py").read_text()
+        self.assertNotIn("currently ignored", source)
+        self.assertNotIn("not supported by upstream llama-quantize", source)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -18,6 +18,11 @@ import shutil
 from pathlib import Path
 from typing import List, Optional, Dict, Any, Tuple
 
+# The quantizer ships alongside this script; reuse its MoE tensor-name mapping so
+# the two drivers cannot drift apart.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from quantize_gguf import moe_tensor_type_args
+
 # Configure logging
 logger = logging.getLogger("convert-and-quantize")
 handler = logging.StreamHandler()
@@ -108,14 +113,14 @@ def parse_args():
         "--moe-expert-quantization", type=str,
         choices=["f32", "f16", "q8_0", "q4_0", "q4_1", "q5_k", "q4_k", "same"],
         default="same",
-        help="Quantization type for MoE expert layers (NOTE: not supported by upstream llama-quantize; currently ignored)"
+        help="Quantization type for MoE expert weights (ffn_gate_exps / ffn_up_exps / ffn_down_exps). Default 'same' leaves them to --type"
     )
     
     parser.add_argument(
         "--moe-router-quantization", type=str,
         choices=["f32", "f16", "q8_0", "q4_0", "q4_1", "q5_k", "q4_k", "same"],
         default="same",
-        help="Quantization type for MoE router layers (NOTE: not supported by upstream llama-quantize; currently ignored)"
+        help="Quantization type for the MoE router (ffn_gate_inp). Routers are small and precision-sensitive, so f32/f16 is often worthwhile. Default 'same'"
     )
     
     parser.add_argument(
@@ -282,15 +287,11 @@ def quantize_gguf_model(args, intermediate_file, llama_cpp_dir, quantize_binary)
     if args.token_embedding_type:
         cmd.extend(["--token-embedding-type", args.token_embedding_type])
     
-    # Selective per-tensor quantization for experts/routers is not supported by
-    # upstream llama-quantize; warn rather than emitting flags that would fail.
-    if args.moe_expert_quantization != "same" or args.moe_router_quantization != "same":
-        logger.warning(
-            "--moe-expert-quantization/--moe-router-quantization are not supported by "
-            f"llama-quantize and will be ignored; all tensors use --type {args.type}. "
-            "Use --output-tensor-type / --token-embedding-type for the tensor-specific "
-            "control that llama-quantize does support."
-        )
+    # Per-tensor expert/router targeting, expressed with llama-quantize's
+    # repeatable --tensor-type NAME=TYPE. Shared with quantize_gguf.py.
+    cmd.extend(moe_tensor_type_args(
+        args.moe_expert_quantization, args.moe_router_quantization
+    ))
 
     # Add input file, output file, and quantization type
     cmd.extend([str(intermediate_file), str(outfile), args.type])

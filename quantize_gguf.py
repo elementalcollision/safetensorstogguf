@@ -241,6 +241,38 @@ def moe_tensor_type_args(expert_type: str, router_type: str) -> List[str]:
     return args
 
 
+def read_gguf_metadata(input_file: Path) -> Dict[str, Any]:
+    """Read selected key/value metadata from a GGUF file.
+
+    Returns the architecture plus, for Mixture-of-Experts models, the expert
+    counts. Expert weights are *stacked* into a single tensor per projection, so
+    the number of experts can only be read from metadata - it cannot be counted
+    from tensor names.
+    """
+    _add_gguf_to_path()
+    from gguf import GGUFReader
+
+    reader = GGUFReader(str(input_file))
+    fields = {name: field for name, field in reader.fields.items()}
+
+    def value(key):
+        field = fields.get(key)
+        if field is None:
+            return None
+        try:
+            return field.contents()
+        except Exception:
+            return None
+
+    arch = value("general.architecture")
+    metadata: Dict[str, Any] = {"architecture": arch}
+    if arch:
+        metadata["expert_count"] = value(f"{arch}.expert_count")
+        metadata["expert_used_count"] = value(f"{arch}.expert_used_count")
+        metadata["block_count"] = value(f"{arch}.block_count")
+    return metadata
+
+
 def read_gguf_tensors(input_file: Path) -> List[Dict[str, Any]]:
     """Read tensor metadata straight out of a GGUF file.
 

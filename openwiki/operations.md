@@ -65,9 +65,9 @@ The GGUF file was created with an older converter that didn't add this metadata 
 
 The model may already be in a compressed format. Use `convert_and_quantize.py` to produce an uncompressed intermediate first, or check with `--analyze-model` for pre-quantized tensor types.
 
-### MoE quantization flags ignored in `convert_and_quantize.py`
+### MoE quantization flags
 
-`convert_and_quantize.py` accepts `--moe-expert-quantization` / `--moe-router-quantization` but warns and ignores them. It does not yet map them to `llama-quantize`'s `--tensor-type`. Use `quantize_gguf.py` directly for per-tensor MoE targeting, or run the two steps manually.
+`--moe-expert-quantization` / `--moe-router-quantization` work in both `quantize_gguf.py` and `convert_and_quantize.py`. Both map onto `llama-quantize`'s repeatable `--tensor-type NAME=TYPE`, targeting `ffn_gate_exps` / `ffn_up_exps` / `ffn_down_exps` for experts and `ffn_gate_inp` for the router. `convert_and_quantize.py` imports the mapping from `quantize_gguf.py` so the two drivers cannot diverge. The default `same` emits nothing and leaves those tensors to `--type`.
 
 ## Known Limitations
 
@@ -78,7 +78,7 @@ From the README and source code:
 3. **`--optimize-*` flags are inert.** `--optimize-for-size`, `--optimize-output-tensor`, `--optimize-token-embeddings` set hparams hints that no current llama.cpp model class reads. Retained for CLI compatibility.
 4. **Pre-#17114 llama.cpp is covered by tests, not by a real run.** The monolithic and one-argument `load_hparams` generations are exercised against stub checkouts in the test suite; recent end-to-end runs all used current llama.cpp.
 5. **`--mmproj` requires a model llama.cpp ships a projector class for.** If the architecture has no projector class, the tool exits with a message telling you to drop the flag.
-6. **`analyze_model.py` uses `llama-quantize --dry-run --verbose`** which is unreliable (`--verbose` is not a valid `llama-quantize` flag and exits 1). The `analyze_model_structure()` function in `quantize_gguf.py` is the recommended replacement — it reads tensors directly via `GGUFReader`.
+6. **Analysis output is structural, not predictive.** `analyze_model.py` and `quantize_gguf.py --analyze-model` both read the GGUF directly via `GGUFReader`, so they report the *current* tensor layout, types and sizes. Neither predicts the post-quantization size; use `llama-quantize --dry-run` for that.
 
 ## Regenerating this wiki
 
