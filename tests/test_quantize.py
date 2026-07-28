@@ -333,5 +333,44 @@ class TestConvertAndQuantizeSharesImatrix(unittest.TestCase):
                       quantize_gguf.validate_imatrix_args)
 
 
+class TestTypeAuto(unittest.TestCase):
+    """`auto` selects analysis-only mode; it is never a quantization type."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.model = self.tmp / "m.gguf"
+        self.model.write_bytes(b"GGUF")   # never opened: auto short-circuits first
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _run(self, *extra):
+        import subprocess
+        return subprocess.run(
+            [sys.executable, str(REPO_ROOT / "quantize_gguf.py"),
+             "--model", str(self.model), *extra],
+            capture_output=True, text=True)
+
+    def test_auto_alone_enters_analysis_mode(self):
+        # Regression: this used to fall through and forward "auto" to
+        # llama-quantize, which rejects it with "invalid ftype 'auto'".
+        out = self._run("--type", "auto")
+        combined = out.stdout + out.stderr
+        self.assertIn("analysis-only", combined)
+        self.assertNotIn("invalid ftype", combined)
+
+    def test_auto_never_invokes_the_quantizer(self):
+        out = self._run("--type", "auto")
+        self.assertNotIn("Running quantization command", out.stdout + out.stderr)
+
+    def test_auto_with_analyze_model_is_unchanged(self):
+        out = self._run("--type", "auto", "--analyze-model")
+        self.assertIn("analysis-only", out.stdout + out.stderr)
+
+    def test_auto_is_still_an_accepted_choice(self):
+        # argparse must not reject it; it is a documented mode selector.
+        self.assertIn("auto", self._run("--help").stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

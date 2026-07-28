@@ -39,7 +39,7 @@ python quantize_gguf.py --model model.gguf --type q4_k
 python convert_and_quantize.py --safetensors-dir /path/to/model --type q4_k
 
 # Analyze a GGUF model's structure
-python quantize_gguf.py --model model.gguf --analyze-model --type auto
+python quantize_gguf.py --model model.gguf --type auto
 ```
 
 ## Documentation Sections
