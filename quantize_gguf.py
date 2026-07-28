@@ -122,7 +122,7 @@ def parse_args():
             # Full precision
             "f16", "bf16", "f32"
         ], default="q4_k",
-        help="Quantization type (default: q4_k, use 'auto' with --analyze-model for analysis-only mode)"
+        help="Quantization type (default: q4_k). Use 'auto' to analyse the model and print quantization recommendations without writing anything"
     )
     
     parser.add_argument(
@@ -180,7 +180,7 @@ def parse_args():
     # MoE-specific options
     parser.add_argument(
         "--analyze-model", action="store_true",
-        help="Analyze model structure before quantization to identify tensor distribution and MoE components"
+        help="Analyze model structure before quantizing, to report tensor distribution and MoE components. Combine with --type auto to analyse only"
     )
     
     parser.add_argument(
@@ -729,8 +729,11 @@ def main():
     logging.basicConfig(level=log_level, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     logger = logging.getLogger("quantize-gguf")
     
-    # Check if we're just analyzing the model structure
-    if args.analyze_model and args.type == "auto":
+    # `auto` is not a quantization type - it selects analysis-only mode, with or
+    # without --analyze-model. Previously this branch also required
+    # --analyze-model, so `--type auto` on its own fell through and was forwarded
+    # to llama-quantize, which rejects it with "invalid ftype 'auto'".
+    if args.type == "auto":
         # In this case, we're just analyzing the model without quantizing
         logger.info("Running in analysis-only mode")
         try:

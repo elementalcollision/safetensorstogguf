@@ -86,7 +86,7 @@ When MoE is detected (or the model name contains "scout" or "moe"), the script a
 ### Analysis-only mode
 
 ```bash
-python quantize_gguf.py --model model.gguf --analyze-model --type auto
+python quantize_gguf.py --model model.gguf --type auto
 ```
 
 Analyzes tensor distribution, detects MoE components, checks for pre-quantized tensors, and prints quantization recommendations. Does not quantize.
@@ -97,7 +97,7 @@ Analyzes tensor distribution, detects MoE components, checks for pre-quantized t
 |---|---|
 | `--model` | Input GGUF file (required) |
 | `--outfile` | Output path (default: `<stem>-<type>.gguf`) |
-| `--type` | Quantization type (default: q4_k). `auto` for analysis-only. |
+| `--type` | Quantization type (default: q4_k). `auto` runs analysis only and writes nothing. |
 | `--threads` | Thread count |
 | `--allow-requantize` | Allow re-quantizing already-quantized tensors |
 | `--leave-output-tensor` | Leave output.weight unquantized |

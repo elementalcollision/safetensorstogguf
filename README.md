@@ -317,7 +317,7 @@ This project is licensed under the MIT License - see the LICENSE file for detail
   - K-quant options: q2_k, q3_k, q4_k, q5_k, q6_k
   - IQ options: iq2_xxs, iq2_xs, iq3_xxs, iq3_xs, iq4_nl
   - Full precision: f16, bf16, f32
-  - Special value: `auto` (use with `--analyze-model` for analysis-only mode)
+  - Special value: `auto` — analyse the model and print quantization recommendations without writing a file (no `--analyze-model` needed)
 - `--imatrix`: Path to an importance matrix from `llama-imatrix`. Improves quality at a given size, and is **required** by the low-bit types `iq1_s`, `iq1_m`, `iq2_xxs`, `iq2_xs`, `iq2_s`, `iq3_xxs`, `q2_k_s`
 - `--include-weights` / `--exclude-weights`: Apply the importance matrix to only, or to all but, the named tensor. Repeatable; mutually exclusive; require `--imatrix`
 - `--threads`: Number of threads to use for quantization (default: number of CPU cores)
