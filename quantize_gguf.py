@@ -146,15 +146,15 @@ def parse_args():
     )
     
     parser.add_argument(
-        "--output-tensor-type", type=str,
-        choices=["f32", "f16", "q8_0", "q4_0", "q4_1"],
-        help="Use this type for the output.weight tensor"
+        "--output-tensor-type", type=str, metavar="GGML_TYPE",
+        help="Use this ggml type for the output.weight tensor. Accepts any type "
+             "llama-quantize knows (f32, f16, bf16, q8_0, q6_k, iq4_nl, ...)"
     )
     
     parser.add_argument(
-        "--token-embedding-type", type=str,
-        choices=["f32", "f16", "q8_0", "q4_0", "q4_1"],
-        help="Use this type for the token embeddings tensor"
+        "--token-embedding-type", type=str, metavar="GGML_TYPE",
+        help="Use this ggml type for the token embeddings tensor. Accepts any "
+             "type llama-quantize knows (f32, f16, bf16, q8_0, q6_k, iq4_nl, ...)"
     )
 
     # Importance matrix
@@ -250,11 +250,18 @@ def imatrix_args(args) -> List[str]:
         result.extend(["--exclude-weights", tensor])
     return result
 
-def _add_gguf_to_path():
-    """Make llama.cpp's `gguf` module importable (same discovery as analyze_gguf.py).
+def _add_gguf_to_path(llama_cpp_dir=None):
+    """Make llama.cpp's `gguf` module importable.
 
-    Prefers an installed `gguf` package; otherwise falls back to a llama.cpp
-    checkout located via LLAMA_CPP_DIR or relative to this script.
+    Search order, highest priority first:
+      1. an already-importable `gguf` package
+      2. ``llama_cpp_dir`` - normally whatever --llama-cpp-dir was given
+      3. the LLAMA_CPP_DIR environment variable
+      4. directories relative to this script
+
+    An explicit --llama-cpp-dir beats the environment: the flag is the more
+    specific instruction, and previously it was ignored here entirely, so
+    pointing the tool at a checkout still failed with "set LLAMA_CPP_DIR".
     """
     try:
         import gguf  # noqa: F401  - already importable
@@ -263,6 +270,8 @@ def _add_gguf_to_path():
         pass
 
     candidate_dirs = []
+    if llama_cpp_dir:
+        candidate_dirs.append(Path(llama_cpp_dir))
     if os.environ.get("LLAMA_CPP_DIR"):
         candidate_dirs.append(Path(os.environ["LLAMA_CPP_DIR"]))
     script_dir = Path(os.path.dirname(os.path.abspath(__file__)))
@@ -272,6 +281,38 @@ def _add_gguf_to_path():
         if (gguf_py / "gguf").is_dir():
             sys.path.insert(0, str(gguf_py))
             return
+
+
+def ggml_type_names(llama_cpp_dir=None) -> Optional[List[str]]:
+    """The ggml type names llama-quantize accepts, or None if unknown.
+
+    llama-quantize's parse_ggml_type() walks every ggml type and compares names
+    case-insensitively, so the valid set is exactly what the `gguf` module
+    enumerates. Reading it from there keeps this in step with upstream instead of
+    freezing a hand-written list.
+    """
+    _add_gguf_to_path(llama_cpp_dir)
+    try:
+        from gguf import GGMLQuantizationType
+    except ImportError:
+        return None
+    return sorted(t.name.lower() for t in GGMLQuantizationType)
+
+
+def validate_ggml_types(fail, args, llama_cpp_dir=None) -> None:
+    """Reject unknown --output-tensor-type / --token-embedding-type values.
+
+    These accept any ggml type. When the `gguf` module is reachable we can say so
+    precisely; otherwise the value is passed through and llama-quantize rejects
+    it at argument-parse time, before loading the model.
+    """
+    valid = ggml_type_names(llama_cpp_dir)
+    if valid is None:
+        return
+    for option, value in (("--output-tensor-type", getattr(args, "output_tensor_type", None)),
+                          ("--token-embedding-type", getattr(args, "token_embedding_type", None))):
+        if value and value.lower() not in valid:
+            fail(f"{option}: unknown ggml type '{value}'. Valid types: {', '.join(valid)}")
 
 
 # Quantization types whose non-embedding tensors cannot be produced without an
@@ -311,7 +352,7 @@ def moe_tensor_type_args(expert_type: str, router_type: str) -> List[str]:
     return args
 
 
-def read_gguf_metadata(input_file: Path) -> Dict[str, Any]:
+def read_gguf_metadata(input_file: Path, llama_cpp_dir=None) -> Dict[str, Any]:
     """Read selected key/value metadata from a GGUF file.
 
     Returns the architecture plus, for Mixture-of-Experts models, the expert
@@ -319,7 +360,7 @@ def read_gguf_metadata(input_file: Path) -> Dict[str, Any]:
     the number of experts can only be read from metadata - it cannot be counted
     from tensor names.
     """
-    _add_gguf_to_path()
+    _add_gguf_to_path(llama_cpp_dir)
     from gguf import GGUFReader
 
     reader = GGUFReader(str(input_file))
@@ -343,7 +384,7 @@ def read_gguf_metadata(input_file: Path) -> Dict[str, Any]:
     return metadata
 
 
-def read_gguf_tensors(input_file: Path) -> List[Dict[str, Any]]:
+def read_gguf_tensors(input_file: Path, llama_cpp_dir=None) -> List[Dict[str, Any]]:
     """Read tensor metadata straight out of a GGUF file.
 
     Replaces an earlier approach that shelled out to ``llama-quantize --dry-run
@@ -352,14 +393,14 @@ def read_gguf_tensors(input_file: Path) -> List[Dict[str, Any]]:
     aggregate per-type counts rather than the per-tensor lines the pattern
     expected. Reading the file is also faster, portable, and needs no binary.
     """
-    _add_gguf_to_path()
+    _add_gguf_to_path(llama_cpp_dir)
     try:
         from gguf import GGUFReader
     except ImportError as e:
         raise ImportError(
             "Could not import the gguf module, which is needed to analyse a GGUF "
             "file. Install it with `pip install gguf`, or set LLAMA_CPP_DIR to a "
-            "llama.cpp checkout that contains gguf-py."
+            "llama.cpp checkout that contains gguf-py, or pass --llama-cpp-dir."
         ) from e
 
     reader = GGUFReader(str(input_file))
@@ -377,7 +418,7 @@ def read_gguf_tensors(input_file: Path) -> List[Dict[str, Any]]:
     return tensors
 
 
-def analyze_model_structure(input_file: Path, verbose: bool = False) -> Dict[str, Any]:
+def analyze_model_structure(input_file: Path, verbose: bool = False, llama_cpp_dir=None) -> Dict[str, Any]:
     """
     Analyze the structure of a GGUF model to understand tensor distribution and identify MoE components.
     
@@ -392,7 +433,7 @@ def analyze_model_structure(input_file: Path, verbose: bool = False) -> Dict[str
     logger.info(f"Analyzing model structure: {input_file}")
     
     try:
-        tensor_info = read_gguf_tensors(input_file)
+        tensor_info = read_gguf_tensors(input_file, llama_cpp_dir)
         # llama-quantize reports these only when it runs; reading the file gives
         # us the true source size instead, and the projected size is not known
         # without invoking the quantizer.
@@ -567,7 +608,7 @@ def quantize_gguf_model(args):
     has_moe = False
     if args.analyze_model:
         logger.info("Analyzing model structure to detect MoE components...")
-        model_analysis = analyze_model_structure(args.model, args.verbose)
+        model_analysis = analyze_model_structure(args.model, args.verbose, args.llama_cpp_dir)
 
         if "error" in model_analysis:
             logger.warning(f"Model analysis failed: {model_analysis['error']}")
@@ -723,11 +764,21 @@ def quantize_gguf_model(args):
 def main():
     """Main entry point."""
     args = parse_args()
-    
+
     # Configure logging
     log_level = logging.DEBUG if args.verbose else logging.INFO
     logging.basicConfig(level=log_level, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     logger = logging.getLogger("quantize-gguf")
+
+    # --output-tensor-type/--token-embedding-type accept any ggml type, so they
+    # are validated here rather than by argparse: the check needs the `gguf`
+    # module, which may only be reachable via --llama-cpp-dir. Runs after logging
+    # is configured so the message is formatted like every other error.
+    def _type_error(message):
+        logger.error(message)
+        sys.exit(2)
+
+    validate_ggml_types(_type_error, args, args.llama_cpp_dir)
     
     # `auto` is not a quantization type - it selects analysis-only mode, with or
     # without --analyze-model. Previously this branch also required
@@ -743,7 +794,8 @@ def main():
                 return 1
                 
             # Analyze the model structure
-            analysis_results = analyze_model_structure(args.model, verbose=True)
+            analysis_results = analyze_model_structure(
+                args.model, verbose=True, llama_cpp_dir=args.llama_cpp_dir)
             
             if "error" in analysis_results:
                 logger.error(f"Error analyzing model: {analysis_results['error']}")

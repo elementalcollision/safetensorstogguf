@@ -372,5 +372,89 @@ class TestTypeAuto(unittest.TestCase):
         self.assertIn("auto", self._run("--help").stdout)
 
 
+class TestLlamaCppDirDiscovery(unittest.TestCase):
+    """--llama-cpp-dir must be able to locate gguf-py on its own."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        # a checkout-shaped tree: <root>/gguf-py/gguf/
+        self.checkout = self.tmp / "llama.cpp"
+        (self.checkout / "gguf-py" / "gguf").mkdir(parents=True)
+        self._path = list(sys.path)
+
+    def tearDown(self):
+        sys.path[:] = self._path
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_explicit_dir_is_added_to_sys_path(self):
+        # Regression: _add_gguf_to_path() took no argument, so --llama-cpp-dir was
+        # ignored and users were told to "set LLAMA_CPP_DIR" instead.
+        if "gguf" in sys.modules:
+            self.skipTest("gguf already importable; discovery is short-circuited")
+        quantize_gguf._add_gguf_to_path(self.checkout)
+        self.assertIn(str(self.checkout / "gguf-py"), sys.path)
+
+    def test_explicit_dir_beats_the_environment(self):
+        if "gguf" in sys.modules:
+            self.skipTest("gguf already importable; discovery is short-circuited")
+        other = self.tmp / "other"
+        (other / "gguf-py" / "gguf").mkdir(parents=True)
+        os.environ["LLAMA_CPP_DIR"] = str(other)
+        try:
+            quantize_gguf._add_gguf_to_path(self.checkout)
+            self.assertEqual(sys.path[0], str(self.checkout / "gguf-py"))
+        finally:
+            os.environ.pop("LLAMA_CPP_DIR", None)
+
+
+@unittest.skipUnless(HAVE_GGUF, "gguf module not available")
+class TestGgmlTypeValidation(unittest.TestCase):
+    """--output-tensor-type / --token-embedding-type accept any ggml type."""
+
+    class _Args:
+        def __init__(self, out=None, emb=None):
+            self.output_tensor_type = out
+            self.token_embedding_type = emb
+
+    def setUp(self):
+        self.errors = []
+
+    def _check(self, **kw):
+        quantize_gguf.validate_ggml_types(self.errors.append, self._Args(**kw))
+        return self.errors
+
+    def test_type_list_comes_from_the_gguf_module(self):
+        names = quantize_gguf.ggml_type_names()
+        self.assertIsNotNone(names)
+        # Types the old hardcoded 5-choice list excluded.
+        for wider in ("q6_k", "bf16", "iq4_nl", "q5_k"):
+            self.assertIn(wider, names)
+
+    def test_accepts_types_beyond_the_old_cap(self):
+        for wider in ("q6_k", "bf16", "iq4_nl", "q5_k", "tq1_0"):
+            self.errors = []
+            self.assertEqual(self._check(out=wider), [], f"{wider} should be valid")
+
+    def test_accepts_the_original_five(self):
+        for legacy in ("f32", "f16", "q8_0", "q4_0", "q4_1"):
+            self.errors = []
+            self.assertEqual(self._check(out=legacy), [])
+
+    def test_is_case_insensitive(self):
+        # llama-quantize compares with striequals().
+        self.assertEqual(self._check(out="Q6_K"), [])
+
+    def test_rejects_unknown_types(self):
+        errs = self._check(out="nonsense")
+        self.assertTrue(any("unknown ggml type" in e for e in errs))
+
+    def test_checks_token_embedding_type_too(self):
+        errs = self._check(emb="nope")
+        self.assertTrue(any("--token-embedding-type" in e for e in errs))
+
+    def test_none_is_accepted(self):
+        self.assertEqual(self._check(), [])
+
+
 if __name__ == "__main__":
     unittest.main()
