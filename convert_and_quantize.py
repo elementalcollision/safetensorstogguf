@@ -21,7 +21,12 @@ from typing import List, Optional, Dict, Any, Tuple
 # The quantizer ships alongside this script; reuse its MoE tensor-name mapping so
 # the two drivers cannot drift apart.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from quantize_gguf import imatrix_args, moe_tensor_type_args, validate_imatrix_args
+from quantize_gguf import (
+    imatrix_args,
+    moe_tensor_type_args,
+    validate_ggml_types,
+    validate_imatrix_args,
+)
 
 # Configure logging
 logger = logging.getLogger("convert-and-quantize")
@@ -173,19 +178,18 @@ def parse_args():
     )
     
     parser.add_argument(
-        "--output-tensor-type", type=str,
-        choices=["f32", "f16"],
+        "--output-tensor-type", type=str, metavar="GGML_TYPE",
         help="Output tensor type (default: unchanged)"
     )
     
     parser.add_argument(
-        "--token-embedding-type", type=str,
-        choices=["f32", "f16"],
+        "--token-embedding-type", type=str, metavar="GGML_TYPE",
         help="Token embedding tensor type (default: unchanged)"
     )
     
     args = parser.parse_args()
     validate_imatrix_args(parser.error, args)
+    validate_ggml_types(parser.error, args, args.llama_cpp_dir)
     return args
 
 def convert_safetensors_to_gguf(args, llama_cpp_dir, convert_script):

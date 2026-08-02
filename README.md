@@ -324,8 +324,8 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 - `--allow-requantize`: Allow requantizing tensors that have already been quantized
 - `--leave-output-tensor`: Leave output.weight unquantized (increases model size but may improve quality)
 - `--pure`: Disable k-quant mixtures and quantize all tensors to the same type
-- `--output-tensor-type`: Use this type for the output.weight tensor (f32, f16, q8_0, q4_0, q4_1)
-- `--token-embedding-type`: Use this type for the token embeddings tensor (f32, f16, q8_0, q4_0, q4_1)
+- `--output-tensor-type`: ggml type for the `output.weight` tensor. Accepts any type llama-quantize knows — `f32`, `f16`, `bf16`, `q8_0`, `q6_k`, `iq4_nl`, … (the valid set is read from the `gguf` module, so it tracks llama.cpp)
+- `--token-embedding-type`: ggml type for the token embeddings tensor. Same accepted set as above
 
 ### MoE-Specific Options
 

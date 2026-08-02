@@ -33,6 +33,8 @@ All scripts use the same discovery order:
 2. `LLAMA_CPP_DIR` environment variable
 3. Relative to the script: `parent.parent`, `parent`, `script_dir` itself
 
+The same order locates the bundled `gguf-py` when the `gguf` package is not installed, so `--llama-cpp-dir` alone is sufficient — an explicit flag takes precedence over `LLAMA_CPP_DIR`.
+
 The converter (`safetensors_to_gguf.py`) looks for `convert_hf_to_gguf.py` in the llama.cpp root. The quantizer and analysis tools look for `llama-quantize` in the root, `build/`, or `build/bin/`.
 
 If discovery fails:

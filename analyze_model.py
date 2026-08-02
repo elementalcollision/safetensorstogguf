@@ -35,9 +35,9 @@ def analyze_model_structure(model_path, llama_cpp_dir=None):
     
     # No llama-quantize binary is needed any more - the analysis reads the GGUF
     # directly. --llama-cpp-dir is still honoured, but only so the bundled
-    # gguf-py can be located when the `gguf` package is not installed.
-    if llama_cpp_dir is not None:
-        os.environ.setdefault("LLAMA_CPP_DIR", str(llama_cpp_dir))
+    # gguf-py can be located when the `gguf` package is not installed. It is
+    # passed through explicitly rather than exported to the environment, so the
+    # flag takes precedence over any pre-existing LLAMA_CPP_DIR.
 
     # Read the model directly instead of shelling out to llama-quantize.
     #
@@ -56,9 +56,9 @@ def analyze_model_structure(model_path, llama_cpp_dir=None):
                 "type": t["type"],
                 "size_mb": t["size_mb"],
             }
-            for i, t in enumerate(read_gguf_tensors(Path(model_path)))
+            for i, t in enumerate(read_gguf_tensors(Path(model_path), llama_cpp_dir))
         ]
-        metadata = read_gguf_metadata(Path(model_path))
+        metadata = read_gguf_metadata(Path(model_path), llama_cpp_dir)
     except Exception as e:
         logger.error(f"Could not read GGUF file: {e}")
         return {"error": str(e)}
