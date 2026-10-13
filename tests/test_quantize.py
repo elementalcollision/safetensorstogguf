@@ -19,6 +19,7 @@ Regression coverage:
 Run with:  python3 -m unittest discover -s tests -v
 """
 
+import os
 import shutil
 import sys
 import tempfile
